@@ -5,6 +5,91 @@ built-in tools on top of the upstream sandbox extension (`carderne/pi-sandbox`).
 cheap to rebase onto upstream: the rendering half lives in fork-only files, and the only
 upstream-tracked file it edits is `src/extension.ts`.
 
+## Install
+
+This fork is a **local package**: install it from the checkout, not from npm. A local install
+loads the repo in place (nothing is copied), so the dependency tree must already exist. Set
+`REPO` to your checkout and install its dependencies first:
+
+```bash
+REPO=/home/justinlam/Documents/pi-sandbox
+cd "$REPO" && pnpm install
+```
+
+If you previously installed the upstream extension, remove it first so `bash` is not
+registered twice. pi keys tools flatly and resolves a duplicate by load order, so leaving both
+installed means this fork's sandboxed `bash` might lose:
+
+```bash
+pi remove npm:pi-sandbox
+```
+
+### Personal install (recommended)
+
+Loads the fork in every project. Adds a `packages` entry to `~/.pi/agent/settings.json`:
+
+```bash
+pi install "$REPO"
+pi list              # should list the checkout and its resolved path
+```
+
+pi stores the source as a path relative to the settings file, so don't move the checkout
+afterwards; reinstall if you do. Edits under `src/rows/` are picked up on `/reload` (or the next
+pi start) because a local install always loads from this checkout — no reinstall needed.
+
+### Project-local install
+
+Only in one project, written to `.pi/settings.json` and loaded once project trust is granted.
+Run this from the project you want the fork loaded in — `$REPO` stays the checkout path:
+
+```bash
+cd /path/to/your/project
+pi install -l "$REPO"
+pi remove -l --approve "$REPO"   # --approve is required to change untrusted project settings
+```
+
+### Try it without installing
+
+For a single invocation:
+
+```bash
+cd "$REPO"
+pi -e ./index.ts
+```
+
+`pi -e .` does **not** work pre-install (a directory only resolves once pi can discover the
+package); use `pi -e ./index.ts`.
+
+### Install from git (only after the branch is pushed)
+
+The rows currently live on `feat/tool-rows-rendering`, not `main`. A plain git install would
+fetch a `main` that has no rows, so pin the ref:
+
+```bash
+pi install git:github.com/justinmklam/pi-sandbox@feat/tool-rows-rendering
+pi install git:github.com/justinmklam/pi-sandbox@main   # after the branch is merged
+```
+
+### Verify
+
+```bash
+pi list                                      # fork listed with its resolved path
+pi -e ./index.ts --help | grep no-sandbox    # extension loaded (its flag is registered)
+```
+
+Then run the interactive gate under [Sync procedure](#sync-procedure). Sandboxing requires
+`ripgrep`, as upstream does.
+
+### Uninstall
+
+```bash
+pi remove "$REPO"          # user settings; match the source you installed
+pi install npm:pi-sandbox   # to go back to upstream
+
+# project-local:
+pi remove -l --approve "$REPO"
+```
+
 ## Delta inventory
 
 | Path | Kind | Notes |
