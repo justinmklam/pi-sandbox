@@ -183,7 +183,7 @@ test("a narrow edit row keeps the diff stat", () => {
 
 test("expanded bash delegates to the built-in renderResult exactly once", () => {
   let calls = 0;
-  const renderers = bashRowRenderers({
+  const renderers: any = bashRowRenderers({
     renderResult: () => {
       calls += 1;
       return { render: () => ["expanded"] };
@@ -203,7 +203,7 @@ test("expanded bash delegates to the built-in renderResult exactly once", () => 
 });
 
 test("expanded bash falls back to an empty component without a builtin", () => {
-  const renderers = bashRowRenderers();
+  const renderers: any = bashRowRenderers();
   const out: any = renderers.renderResult(
     { content: [] },
     { isPartial: false, expanded: true },
@@ -220,7 +220,7 @@ test("expanded bash falls back to an empty component without a builtin", () => {
 // --- spinner lifecycle -----------------------------------------------------------
 
 test("a settled shell result clears its spinner interval before stopAllTimers", () => {
-  const renderers = bashRowRenderers();
+  const renderers: any = bashRowRenderers();
   const ctx = context({
     args: { command: "sleep 1" },
     isPartial: true,
