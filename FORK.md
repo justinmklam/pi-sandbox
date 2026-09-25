@@ -8,12 +8,12 @@ upstream-tracked file it edits is `src/extension.ts`.
 ## Install
 
 This fork is a **local package**: install it from the checkout, not from npm. A local install
-loads the repo in place (nothing is copied), so the dependency tree must already exist. Set
-`REPO` to your checkout and install its dependencies first:
+loads the repo in place (nothing is copied), so the dependency tree must already exist. `cd` to
+the checkout and install its dependencies first:
 
 ```bash
-REPO=/home/justinlam/Documents/pi-sandbox
-cd "$REPO" && pnpm install
+cd ~/Documents/pi-sandbox
+pnpm install
 ```
 
 If you previously installed the upstream extension, remove it first so `bash` is not
@@ -24,12 +24,17 @@ installed means this fork's sandboxed `bash` might lose:
 pi remove npm:pi-sandbox
 ```
 
+> `$PWD` is uppercase. `$pwd` is not a shell variable and expands to an empty string, which
+> makes `pi install "$pwd"` fail with `Missing install source`.
+
 ### Personal install (recommended)
 
-Loads the fork in every project. Adds a `packages` entry to `~/.pi/agent/settings.json`:
+Loads the fork in every project. Adds a `packages` entry to `~/.pi/agent/settings.json`. Run
+this from the repo root:
 
 ```bash
-pi install "$REPO"
+cd ~/Documents/pi-sandbox
+pi install "$PWD"
 pi list              # should list the checkout and its resolved path
 ```
 
@@ -40,12 +45,13 @@ pi start) because a local install always loads from this checkout — no reinsta
 ### Project-local install
 
 Only in one project, written to `.pi/settings.json` and loaded once project trust is granted.
-Run this from the project you want the fork loaded in — `$REPO` stays the checkout path:
+Run this from the project you want the fork loaded in, so `$PWD` here is the project, not the
+checkout — pass the checkout path explicitly:
 
 ```bash
 cd /path/to/your/project
-pi install -l "$REPO"
-pi remove -l --approve "$REPO"   # --approve is required to change untrusted project settings
+pi install -l /home/justinlam/Documents/pi-sandbox
+pi remove -l --approve /home/justinlam/Documents/pi-sandbox   # --approve is required for untrusted project settings
 ```
 
 ### Try it without installing
@@ -53,7 +59,7 @@ pi remove -l --approve "$REPO"   # --approve is required to change untrusted pro
 For a single invocation:
 
 ```bash
-cd "$REPO"
+cd ~/Documents/pi-sandbox
 pi -e ./index.ts
 ```
 
@@ -72,6 +78,8 @@ pi install git:github.com/justinmklam/pi-sandbox@main   # after the branch is me
 
 ### Verify
 
+From the repo root:
+
 ```bash
 pi list                                      # fork listed with its resolved path
 pi -e ./index.ts --help | grep no-sandbox    # extension loaded (its flag is registered)
@@ -83,11 +91,12 @@ Then run the interactive gate under [Sync procedure](#sync-procedure). Sandboxin
 ### Uninstall
 
 ```bash
-pi remove "$REPO"          # user settings; match the source you installed
+cd ~/Documents/pi-sandbox
+pi remove "$PWD"            # user settings; match the source you installed
 pi install npm:pi-sandbox   # to go back to upstream
 
-# project-local:
-pi remove -l --approve "$REPO"
+# project-local (from the project):
+pi remove -l --approve /home/justinlam/Documents/pi-sandbox
 ```
 
 ## Delta inventory
