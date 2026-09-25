@@ -1,6 +1,6 @@
 import test from "node:test";
 
-import { createBashToolDefinition } from "@earendil-works/pi-coding-agent";
+import { visibleWidth as piVisibleWidth } from "@earendil-works/pi-tui";
 /**
  * Registration-shape and renderer-drive tests for the compact rows.
  *
@@ -11,9 +11,14 @@ import { createBashToolDefinition } from "@earendil-works/pi-coding-agent";
  */
 import assert from "node:assert/strict";
 
+import { BashBoxComponent } from "../src/rows/bash-box.ts";
 import { bashRowRenderers, installRowTools, stopAllTimers } from "../src/rows/render.ts";
 
 const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
+
+/** Strip SGR/OSC escapes so assertions compare plain text. */
+const stripAnsi = (text: string) =>
+  text.replace(/\x1b\[[0-9;]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "");
 
 type FakePi = {
   pi: any;
@@ -98,8 +103,7 @@ test("the edit row still renders as one self-styled row", () => {
 });
 
 test("bashRowRenderers exposes only the three renderer keys and no execute", () => {
-  const localBash = createBashToolDefinition(process.cwd());
-  const renderers = bashRowRenderers(localBash);
+  const renderers = bashRowRenderers();
 
   assert.deepEqual(Object.keys(renderers).sort(), ["renderCall", "renderResult", "renderShell"]);
   assert.equal(renderers.renderShell, "self");
@@ -181,40 +185,166 @@ test("a narrow edit row keeps the diff stat", () => {
 
 // --- expanded bash ---------------------------------------------------------------
 
-test("expanded bash delegates to the built-in renderResult exactly once", () => {
-  let calls = 0;
-  const renderers: any = bashRowRenderers({
-    renderResult: () => {
-      calls += 1;
-      return { render: () => ["expanded"] };
-    },
-  });
-
-  const ctx = context({ args: { command: "ls" } });
+test("expanded bash result stays inside the frame and shows every output line", () => {
+  const renderers: any = bashRowRenderers();
+  const output = ["a", "b", "c", "d", "e", "f"].join("\n");
   const out: any = renderers.renderResult(
-    { content: [] },
+    { content: [{ type: "text", text: output }] },
     { isPartial: false, expanded: true },
     theme,
-    ctx,
+    context({ args: { command: "seq 1 6" } }),
   );
 
-  assert.equal(calls, 1);
-  assert.deepEqual(out.render(80), ["expanded"]);
+  const lines = out.render(60).map(stripAnsi);
+  const joined = lines.join("\n");
+  const body = (rendered: string) => rendered.replace(/[│╭╮╰╯─├┤]/g, "").trim();
+  assert.ok(joined.includes("╭"), "expanded box keeps the top border");
+  assert.ok(joined.includes("├── Output"), "expanded box keeps the separator");
+  assert.ok(!joined.includes("earlier lines"), "expanded box shows no preview hint");
+  for (const line of ["a", "b", "c", "d", "e", "f"]) {
+    assert.ok(
+      lines.some((rendered: string) => body(rendered) === line),
+      `missing output line ${line}`,
+    );
+  }
+  assert.ok(joined.includes("$ seq 1 6"), joined);
 });
 
-test("expanded bash falls back to an empty component without a builtin", () => {
+test("collapsed bash result previews the tail with the expand hint", () => {
+  const renderers: any = bashRowRenderers();
+  const output = ["a", "b", "c", "d", "e", "f"].join("\n");
+  const out: any = renderers.renderResult(
+    { content: [{ type: "text", text: output }] },
+    { isPartial: false, expanded: false },
+    theme,
+    context({ args: { command: "seq 1 6" } }),
+  );
+
+  const joined = out.render(60).map(stripAnsi).join("\n");
+  assert.ok(joined.includes("earlier lines"), joined);
+  assert.ok(joined.includes("e"), joined);
+  assert.ok(joined.includes("f"), joined);
+});
+
+test("expanded bash keeps the whole command in the title", () => {
+  const renderers: any = bashRowRenderers();
+  const command = "echo this-command-is-long-but-fits-at-this-width";
+  const out: any = renderers.renderResult(
+    { content: [{ type: "text", text: "ok" }] },
+    { isPartial: false, expanded: true },
+    theme,
+    context({ args: { command } }),
+  );
+
+  const title = out
+    .render(200)
+    .map(stripAnsi)
+    .find((line: string) => line.includes("$"));
+  assert.ok(title?.includes(command), title);
+  assert.ok(!title?.includes("…"), title);
+});
+
+test("a settled expanded bash call renders nothing in the call slot", () => {
+  const renderers: any = bashRowRenderers();
+  const ctx = context({ args: { command: "echo hi" }, expanded: true });
+  const lines = renderers
+    .renderCall({ command: "echo hi" }, theme, ctx)
+    .render(80)
+    .filter((line: string) => line.trim() !== "");
+  assert.deepEqual(lines, []);
+});
+
+test("a settled collapsed bash call renders nothing in the call slot", () => {
+  const renderers: any = bashRowRenderers();
+  const ctx = context({ args: { command: "echo hi" } });
+  const lines = renderers
+    .renderCall({ command: "echo hi" }, theme, ctx)
+    .render(80)
+    .filter((line: string) => line.trim() !== "");
+  assert.deepEqual(lines, []);
+});
+
+test("a replayed settled bash call renders nothing in the call slot", () => {
+  // History replay calls updateResult(message) without markExecutionStarted(), so
+  // executionStarted stays false. The result slot owns the box, so this must stay empty.
+  const renderers: any = bashRowRenderers();
+  const ctx = context({
+    args: { command: "git status" },
+    executionStarted: false,
+    isPartial: false,
+  });
+  const lines = renderers
+    .renderCall({ command: "git status" }, theme, ctx)
+    .render(80)
+    .filter((line: string) => line.trim() !== "");
+  assert.deepEqual(lines, []);
+});
+
+test("a streaming bash call renders the framed box with a running footer", () => {
+  const renderers: any = bashRowRenderers();
+  const ctx = context({
+    args: { command: "git status" },
+    isPartial: true,
+    toolCallId: "stream-1",
+    invalidate() {},
+  });
+  const joined = renderers
+    .renderCall({ command: "git status" }, theme, ctx)
+    .render(80)
+    .map(stripAnsi)
+    .join("\n");
+  assert.ok(joined.includes("╭"), joined);
+  assert.ok(joined.includes("├── Output"), joined);
+  assert.ok(joined.includes("git status"), joined);
+  assert.ok(joined.includes("Running"), joined);
+  stopAllTimers();
+});
+
+test("the bash result slot stays empty while the call is streaming", () => {
+  const renderers: any = bashRowRenderers();
+  const out: any = renderers.renderResult(
+    { content: [{ type: "text", text: "partial output" }] },
+    { isPartial: true, expanded: false },
+    theme,
+    context({ args: { command: "seq 1 3" }, isPartial: true, toolCallId: "stream-2" }),
+  );
+  // Zero rendered lines, not a blank one, so the box does not shift when it settles.
+  assert.deepEqual(out.render(80), []);
+});
+
+test("the bash box re-clips with pi-tui so a width-table mismatch cannot overflow", () => {
+  // `✅` is one column in measure.ts but two in pi-tui; without the backstop the padded box
+  // would emit a line two columns wider than the terminal and pi would abort the render.
+  const box = new BashBoxComponent({
+    command: "echo probe",
+    output: "✅✅",
+    isError: false,
+    durationMs: undefined,
+    theme,
+    expanded: true,
+  });
+  for (const width of [40, 30, 20, 16]) {
+    for (const line of box.render(width)) {
+      assert.ok(
+        piVisibleWidth(line) <= width,
+        `line is ${piVisibleWidth(line)} columns at width ${width}`,
+      );
+    }
+  }
+});
+
+test("an expanded bash result with no output still shows the framed command", () => {
   const renderers: any = bashRowRenderers();
   const out: any = renderers.renderResult(
     { content: [] },
     { isPartial: false, expanded: true },
     theme,
-    context(),
+    context({ args: { command: "seq 1 3" } }),
   );
 
-  assert.deepEqual(
-    out.render(80).filter((line: string) => line.trim() !== ""),
-    [],
-  );
+  const joined = out.render(80).map(stripAnsi).join("\n");
+  assert.ok(joined.includes("╭"), joined);
+  assert.ok(joined.includes("$ seq 1 3"), joined);
 });
 
 // --- spinner lifecycle -----------------------------------------------------------

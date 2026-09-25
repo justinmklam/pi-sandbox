@@ -20,6 +20,7 @@ import {
   parseShellOutcome,
   renderRow,
   shortenMiddle,
+  wrapPlain,
   type ThemeLike,
 } from "../src/rows/format.ts";
 import { stripAnsi, truncateStyled, visibleWidth } from "../src/rows/measure.ts";
@@ -298,6 +299,33 @@ test("an edit row keeps its diff stat ahead of the duration", () => {
   };
   const line = renderRow(row, 80, theme);
   assert.equal(stripAnsi(line), "✎ edit src/session.ts +7 / -2 · 0.12s");
+});
+
+test("wrapPlain wraps on words and hard-breaks over-long words", () => {
+  assert.deepEqual(wrapPlain("one two three four", 9), ["one two", "three", "four"]);
+  assert.deepEqual(wrapPlain("supercalifragilistic", 6), ["superc", "alifra", "gilist", "ic"]);
+  assert.deepEqual(wrapPlain("", 10), [""]);
+  assert.deepEqual(wrapPlain("anything", 0), [""]);
+});
+
+test("a multi-line title keeps every box row exactly the requested width", () => {
+  for (const width of [80, 60, 40, 20, 16]) {
+    const rows = frameBox(
+      {
+        titleLines: ["$ one", "  two", "  three"],
+        separator: "Output",
+        body: ["body"],
+        footer: "Exit 0",
+      },
+      width,
+      (text) => text,
+    );
+    // top + 3 title rows + separator + 1 body + footer + bottom
+    assert.equal(rows.length, 8, `row count at width ${width}`);
+    for (const row of rows) {
+      assert.equal(visibleWidth(row), width, `row width ${visibleWidth(row)} at ${width}`);
+    }
+  }
 });
 
 test("a clipped edit row keeps the diff stat visible", () => {

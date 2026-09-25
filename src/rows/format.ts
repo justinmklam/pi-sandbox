@@ -49,11 +49,39 @@ export type ShellOutcome = {
 };
 
 export type BoxOptions = {
-  title: string;
+  /** Single-line title. Prefer `titleLines` when the title must wrap across rows. */
+  title?: string;
+  /** Multi-line title, drawn as consecutive padded rows between the top border and separator. */
+  titleLines?: string[];
   separator: string;
   body: string[];
   footer?: string;
 };
+
+/**
+ * Word-wrap plain, unstyled text to `width` columns, hard-breaking any word longer than the
+ * width. Used to show a whole shell command across several box rows when the box is expanded.
+ */
+export function wrapPlain(text: string, width: number): string[] {
+  if (width <= 0) return [""];
+  const lines: string[] = [];
+  let current = "";
+  for (const word of text.split(" ")) {
+    if (word.length === 0) continue;
+    if (current.length === 0) current = word;
+    else if (current.length + 1 + word.length <= width) current += ` ${word}`;
+    else {
+      lines.push(current);
+      current = word;
+    }
+    while (current.length > width) {
+      lines.push(current.slice(0, width));
+      current = current.slice(width);
+    }
+  }
+  if (current.length > 0) lines.push(current);
+  return lines.length > 0 ? lines : [""];
+}
 
 /** Keep both ends of an over-long string: `cd /very/lon…build --flag`. */
 export function shortenMiddle(plain: string, budget: number, headShare = 0.45): string {
@@ -239,7 +267,8 @@ export function frameBox(
   width: number,
   border: (text: string) => string,
 ): string[] {
-  const flat = [options.title, ...options.body, options.footer].filter((line): line is string =>
+  const titles = options.titleLines ?? (options.title ? [options.title] : []);
+  const flat = [...titles, ...options.body, options.footer].filter((line): line is string =>
     Boolean(line),
   );
   if (width < 16) return flat.map((line) => truncateStyled(line, width));
@@ -257,7 +286,7 @@ export function frameBox(
 
   const rows: string[] = [];
   rows.push(border(`╭${"─".repeat(Math.max(0, width - 2))}╮`));
-  rows.push(pad(options.title));
+  for (const title of titles) rows.push(pad(title));
   rows.push(border(`├── ${label}${"─".repeat(separatorFill)}┤`));
   for (const line of options.body) rows.push(pad(line));
   if (options.footer) rows.push(pad(options.footer));

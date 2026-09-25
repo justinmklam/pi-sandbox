@@ -105,16 +105,19 @@ pi remove -l --approve /home/justinlam/Documents/pi-sandbox
 |---|---|---|
 | `src/rows/**` | fork-only | No upstream counterpart. Vendored from the frozen `ref/tool-rows/` snapshot, then adapted. This is the only live copy. |
 | `test/rows-format.test.ts`, `test/rows-render.test.ts` | fork-only | Ported gates for the row strings and the registration shape. |
-| `src/extension.ts` | upstream-tracked | The entire delta is 4 lines: the import at line 24, `...bashRowRenderers(localBash)` at line 176, `installRowTools(pi, localCwd)` at line 451, and one blank line. |
+| `src/extension.ts` | upstream-tracked | Two additive hunks (+14/−7): the rows wiring (import at line 24, `...bashRowRenderers()` at line 181, `installRowTools(pi, localCwd)` at line 458) and a fork-only simplified footer status (`updateStatus` at lines 101–111 — `🔒 sandbox` when enabled, cleared when disabled — called on enable success, enable failure, disable, and both `--no-sandbox` / config-disabled paths). |
 | `ref/` | reference only | Frozen snapshot of the original tool-rows extension. Not a build input and never staged (untracked). Never treat it as the source of truth. |
 
 Rule for rebases: a conflict outside `src/extension.ts` means this fork drifted into an
-upstream-owned file. Undo that drift rather than resolving the conflict. The one permitted
-hunk is additive (an import, a spread, and a call), so conflicts there stay local and small.
+upstream-owned file. Undo that drift rather than resolving the conflict. The permitted hunks
+stay in `src/extension.ts` — the rows wiring and the footer status — so conflicts there stay
+local and small.
 
 Do not bump `package.json` `version`: upstream bumps it on release, and a fork-side bump would
-conflict on every sync. `src/config.ts` and `sandbox.json` are untouched — the rendering
-toggles are code constants in `src/rows/config.ts`, not sandbox configuration.
+conflict on every sync. `src/config.ts`, `src/ui.ts`, and `sandbox.json` are untouched. The
+rendering toggles are code constants in `src/rows/config.ts`, not sandbox configuration, and
+the fork's footer no longer calls `src/ui.ts`'s `formatSandboxStatus` (that function remains
+exported upstream but is now unused here).
 
 ## Sync procedure
 
@@ -126,10 +129,14 @@ Then re-run the interactive gate with `pi -e ./index.ts` and confirm:
 
 1. A quiet command (`git add -A`) renders one row with `$ … ✓`.
 2. A noisy command renders a border-only box with an `Output` separator and an
-   `Exit 0 · Xs · ~N words` footer, with no background fill.
+   `Exit 0 · Xs · ~N words` footer, with no background fill. While it runs, the same frame is
+   drawn with a `⠋ Running · Ns` footer instead, so nothing shifts when it settles.
 3. A failing command renders the same box in the error colour with `✘ Error`.
 4. `read`, `edit`, `write`, `grep`, `find`, `ls` each render one bare row.
-5. `Ctrl+O` on any row expands to pi's built-in rendering, including diffs.
+5. `Ctrl+O` expands every row. The six non-shell tools fall back to pi's built-in rendering
+   (including diffs); the `bash` box stays framed and shows the whole command (wrapped) plus
+   every output line. In fullscreen TUI mode (`tuiMode: "fullscreen"`) clicking a single row
+   toggles just that row; regular mode never captures mouse input, so clicks do nothing there.
 6. **Sandbox survival:** a `bash` command writing outside `allowWrite` must still prompt
    (or be refused in `--print` mode) and leave no file behind:
    `test ! -e ~/pi-sandbox-denied-probe.txt`.

@@ -42,9 +42,6 @@ import { buildRow, RowText, type ToolName } from "./rows.ts";
 
 const TOOL_NAMES: readonly ToolName[] = ["read", "edit", "write", "grep", "find", "ls"];
 
-/** The fork's own bash definition, used only for expanded rendering. */
-type BashRenderHost = { renderResult?: (...args: any[]) => unknown };
-
 /** Built-in definitions for expanded rendering, keyed by tool name. */
 type Builtins = Partial<Record<ToolName, any>>;
 
@@ -158,23 +155,36 @@ function renderCall(
 }
 
 /**
- * The shell call slot. A settled, collapsed shell call renders nothing here because
- * `renderBashResult` owns that slot: it draws either the bare `✓` row or the framed box.
- * Keeping one owner is what stops a duplicate row from flashing above a new box.
+ * A component with zero rendered lines, so an empty slot contributes no vertical shift and the
+ * framed box keeps its position as it moves from the call slot to the result slot.
+ */
+function emptyComponent(): Component {
+  return { render: () => [], invalidate: () => {} };
+}
+
+/**
+ * The shell call slot. It draws the framed box while the call is in progress, so a running
+ * command has the same bordered shape as the finished one; `renderBashResult` then draws the
+ * settled box (or bare `✓` row) once `isPartial` goes false. Keying the empty case off
+ * `isPartial` also covers history replay, where pi calls `updateResult` without ever setting
+ * `executionStarted`; keying off `executionStarted` drew the command twice.
  */
 function renderBashCall(args: any, theme: any, context: any, state: RowState): Component {
-  const running = context.executionStarted && context.isPartial;
-  if (!running && context.executionStarted && !context.expanded) return new Text("", 0, 0);
+  if (context.isPartial !== true) return emptyComponent();
 
+  const running = context.executionStarted === true;
   const elapsedMs = running ? spin(context, state) : undefined;
-  const row = shellRow(args, context.cwd);
-  if (running) {
-    row.spinner = SPINNER_FRAMES[spinnerTick % SPINNER_FRAMES.length];
-    row.suffix = `${Math.max(0, Math.floor((elapsedMs ?? 0) / 1000))}s`;
-  } else {
-    applyFinish(row, state, context);
-  }
-  return new RowText(row, theme);
+  return new BashBoxComponent({
+    command: typeof args?.command === "string" ? args.command : "",
+    output: "",
+    isError: false,
+    durationMs: undefined,
+    theme,
+    expanded: context.expanded === true,
+    running: true,
+    spinner: SPINNER_FRAMES[spinnerTick % SPINNER_FRAMES.length],
+    elapsedMs,
+  }) as unknown as Component;
 }
 
 function shellRow(args: any, cwd: string): Row {
@@ -205,15 +215,7 @@ function renderResult(
     nudge(context);
   }
 
-  if (name === "bash")
-    return renderBashResult(
-      defs.bash as BashRenderHost | undefined,
-      result,
-      options,
-      theme,
-      context,
-      state,
-    );
+  if (name === "bash") return renderBashResult(result, options, theme, context, state);
 
   // `edit`'s diff arrives here but its row is drawn in the call slot, so stash the counts and
   // redraw that row in place. Nothing is emitted into the result slot while collapsed, which
@@ -242,40 +244,40 @@ function renderResult(
 }
 
 function renderBashResult(
-  builtinBash: BashRenderHost | undefined,
   result: any,
   options: any,
   theme: any,
   context: any,
   state: RowState,
 ): Component {
-  if (options.expanded) {
-    return (builtinBash?.renderResult?.(result, options, theme, {
-      ...context,
-      lastComponent: undefined,
-    }) ?? new Text("", 0, 0)) as Component;
-  }
+  const expanded = options.expanded === true;
 
-  // While the command runs, the call row carries the spinner and elapsed time; output is
-  // revealed when the call settles so streaming output cannot grow the transcript.
-  if (options.isPartial && context.isError !== true) return new Text("", 0, 0);
+  // The call slot owns the in-progress frame; this slot only draws once the call settles, so
+  // the command never appears in both slots at once.
+  if (options.isPartial) return emptyComponent();
 
   const output = textOf(result);
   const outcome = parseShellOutcome(output, context.isError === true);
   const boxed =
-    CONFIG.bashBoxWhen === "always" || context.isError === true || outcome.body.trim().length > 0;
+    expanded ||
+    CONFIG.bashBoxWhen === "always" ||
+    context.isError === true ||
+    outcome.body.trim().length > 0;
   if (!boxed) {
     const row = shellRow(context.args, context.cwd);
     applyFinish(row, state, context);
     return new RowText(row, theme);
   }
 
+  // Expanded stays inside the same frame as the collapsed box: every output line and the whole
+  // command (wrapped across rows) instead of the preview and the middle-clipped command.
   return new BashBoxComponent({
     command: typeof context.args?.command === "string" ? context.args.command : "",
     output,
     isError: context.isError === true,
     durationMs: elapsed(state),
     theme,
+    expanded,
   }) as unknown as Component;
 }
 
@@ -294,21 +296,22 @@ function spin(context: any, state: RowState): number {
 }
 
 /**
- * Row renderers for the fork's own sandboxed bash tool. `builtinBash` is the fork's
- * `localBash` definition; the expanded view delegates to its stock `renderResult`.
+ * Row renderers for the fork's own sandboxed bash tool. Collapsed and expanded both stay inside
+ * the fork's border-only frame; only the amount shown changes.
  *
  * Only the three renderer keys are returned, so spreading this onto the fork's
  * `registerTool({ ...localBash })` can never clobber `execute` or `label`.
  */
-export function bashRowRenderers(
-  builtinBash?: BashRenderHost,
-): Pick<ToolDefinition<any, any, any>, "renderShell" | "renderCall" | "renderResult"> {
+export function bashRowRenderers(): Pick<
+  ToolDefinition<any, any, any>,
+  "renderShell" | "renderCall" | "renderResult"
+> {
   return {
     renderShell: CONFIG.renderShell,
     renderCall: (args: any, theme: any, context: any) =>
       renderCall({}, "bash", args, theme, context),
     renderResult: (result: any, options: any, theme: any, context: any) =>
-      renderResult({ bash: builtinBash }, "bash", result, options, theme, context),
+      renderResult({}, "bash", result, options, theme, context),
   };
 }
 
