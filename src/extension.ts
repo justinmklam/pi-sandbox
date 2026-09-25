@@ -21,6 +21,7 @@ import {
   matchesPattern,
   resolveWritePermission,
 } from "./policy.ts";
+import { bashRowRenderers, installRowTools } from "./rows/render.ts";
 import {
   createSandboxedBashOps,
   extractBlockedWritePath,
@@ -172,6 +173,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerTool({
     ...localBash,
+    ...bashRowRenderers(localBash),
     label: "bash (sandboxed)",
     async execute(id, params, signal, onUpdate, ctx) {
       const runBash = () => {
@@ -445,4 +447,6 @@ export default function (pi: ExtensionAPI) {
       );
     },
   });
+
+  installRowTools(pi, localCwd);
 }
