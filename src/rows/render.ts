@@ -308,7 +308,7 @@ export function bashRowRenderers(
     renderCall: (args: any, theme: any, context: any) =>
       renderCall({}, "bash", args, theme, context),
     renderResult: (result: any, options: any, theme: any, context: any) =>
-      renderBashResult(builtinBash, result, options, theme, context, context.state as RowState),
+      renderResult({ bash: builtinBash }, "bash", result, options, theme, context),
   };
 }
 
