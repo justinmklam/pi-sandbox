@@ -21,6 +21,7 @@ import {
   matchesPattern,
   resolveWritePermission,
 } from "./policy.ts";
+import { bashRowRenderers, installRowTools } from "./rows/render.ts";
 import {
   createSandboxedBashOps,
   extractBlockedWritePath,
@@ -32,7 +33,6 @@ import {
 } from "./sandbox-runtime.ts";
 import {
   formatSandboxConfiguration,
-  formatSandboxStatus,
   type PermissionPromptResult,
   promptDomainBlock,
   promptReadBlock,
@@ -98,11 +98,16 @@ export default function (pi: ExtensionAPI) {
     await refreshSandbox(cwd);
   }
 
+  /**
+   * Fork-only footer status: a lock when enabled, no domain or write-path counts. Disabled
+   * clears the status entirely rather than showing an open lock, so `--no-sandbox` and a
+   * config-disabled session leave the footer clean.
+   */
   function updateStatus(
     ctx: Parameters<typeof warnIfAllDomainsAllowed>[0],
-    config: ReturnType<typeof loadConfig>,
-  ) {
-    ctx.ui.setStatus("sandbox", ctx.ui.theme.fg("accent", formatSandboxStatus(config)));
+    enabled: boolean,
+  ): void {
+    ctx.ui.setStatus("sandbox", enabled ? ctx.ui.theme.fg("accent", "🔒 sandbox") : "");
   }
 
   async function enableSandbox(
@@ -129,10 +134,11 @@ export default function (pi: ExtensionAPI) {
       sandboxEnabled = true;
       sandboxInitialized = true;
       warnIfAllDomainsAllowed(ctx, config);
-      updateStatus(ctx, config);
+      updateStatus(ctx, true);
       return true;
     } catch (error) {
       sandboxEnabled = false;
+      updateStatus(ctx, false);
       ctx.ui.notify(
         `Sandbox initialization failed: ${error instanceof Error ? error.message : error}`,
         "error",
@@ -158,7 +164,7 @@ export default function (pi: ExtensionAPI) {
     }
     sandboxEnabled = false;
     sandboxInitialized = false;
-    ctx.ui.setStatus("sandbox", "");
+    updateStatus(ctx, false);
     return true;
   }
 
@@ -172,6 +178,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerTool({
     ...localBash,
+    ...bashRowRenderers(),
     label: "bash (sandboxed)",
     async execute(id, params, signal, onUpdate, ctx) {
       const runBash = () => {
@@ -355,11 +362,13 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     if (pi.getFlag("no-sandbox") as boolean) {
       sandboxEnabled = false;
+      updateStatus(ctx, false);
       ctx.ui.notify("Sandbox disabled via --no-sandbox", "warning");
       return;
     }
     if (!loadConfig(ctx.cwd).enabled) {
       sandboxEnabled = false;
+      updateStatus(ctx, false);
       ctx.ui.notify("Sandbox disabled via config", "info");
       return;
     }
@@ -445,4 +454,6 @@ export default function (pi: ExtensionAPI) {
       );
     },
   });
+
+  installRowTools(pi, localCwd);
 }
