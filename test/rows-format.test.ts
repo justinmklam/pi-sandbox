@@ -163,18 +163,18 @@ test("shell rows bold the prompt and keep the command", () => {
   assert.ok(line.endsWith("· 0.08s"));
 });
 
-test("a running shell row shows a spinner and elapsed seconds", () => {
+test("a shell row keeps its trailing note and clips to the width", () => {
   assert.equal(
     renderRow(
-      { spinner: "⠹", icon: "$", name: "bash", value: "npm run test", shell: true, suffix: "2s" },
+      { icon: "$", name: "bash", value: "npm run test", shell: true, suffix: "2s" },
       60,
       plain,
     ),
-    "⠹ $ npm run test 2s",
+    "$ npm run test 2s",
   );
   for (const width of [120, 60, 20]) {
     const clipped = renderRow(
-      { spinner: "⠹", icon: "$", name: "bash", value: "a".repeat(200), shell: true, suffix: "2s" },
+      { icon: "$", name: "bash", value: "a".repeat(200), shell: true, suffix: "2s" },
       width,
       plain,
     );

@@ -58,26 +58,30 @@ type RowState = {
   diffStat?: { added: number; removed: number };
 };
 
-const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-const SPINNER_INTERVAL_MS = 200;
+// A running shell call only redraws to advance its elapsed-seconds footer. The count stays
+// hidden until the call is old enough to be worth reporting, then refreshes at
+// `RUNNING_TICK_MS`, so a short command costs no redraws at all and a long one costs at most
+// one full render per tick. `context.invalidate()` rebuilds the whole tool component and asks
+// pi for a full-transcript render, so the cadence here is the render cost.
+const RUNNING_DURATION_AFTER_MS = 5000;
+const RUNNING_TICK_MS = 1000;
 
 // Session-scoped timers. pi requires long-lived timers to be cleaned up idempotently, so
 // both collections are cleared from `session_shutdown` as well as on each call's finish.
-const spinners = new Map<string, ReturnType<typeof setInterval>>();
+const tickers = new Map<string, ReturnType<typeof setInterval>>();
 const nudges = new Set<ReturnType<typeof setTimeout>>();
-let spinnerTick = 0;
 
-function stopSpinner(id: string): void {
-  const timer = spinners.get(id);
+function stopTicker(id: string): void {
+  const timer = tickers.get(id);
   if (timer) {
     clearInterval(timer);
-    spinners.delete(id);
+    tickers.delete(id);
   }
 }
 
 export function stopAllTimers(): void {
-  for (const timer of spinners.values()) clearInterval(timer);
-  spinners.clear();
+  for (const timer of tickers.values()) clearInterval(timer);
+  tickers.clear();
   for (const timer of nudges) clearTimeout(timer);
   nudges.clear();
 }
@@ -192,7 +196,6 @@ function renderBashCall(args: any, theme: any, context: any, state: RowState): C
     theme,
     expanded: context.expanded === true,
     running: true,
-    spinner: SPINNER_FRAMES[spinnerTick % SPINNER_FRAMES.length],
     elapsedMs,
   }) as unknown as Component;
 }
@@ -221,8 +224,10 @@ function renderResult(
 
   if (!options.isPartial && state.endedAt === undefined) {
     state.endedAt = Date.now();
-    stopSpinner(String(context.toolCallId ?? "bash"));
-    nudge(context);
+    stopTicker(String(context.toolCallId ?? "bash"));
+    // The shell box measures its own duration in the result slot, so only a call-slot row
+    // needs the extra pass to pick the duration up.
+    if (name !== "bash") nudge(context);
   }
 
   if (name === "bash") return renderBashResult(result, options, theme, context, state);
@@ -291,18 +296,23 @@ function renderBashResult(
   }) as unknown as Component;
 }
 
-/** Start (or keep) the running-call spinner and return the elapsed milliseconds. */
-function spin(context: any, state: RowState): number {
+/**
+ * Start (or keep) the running-call ticker and return the elapsed milliseconds, or undefined
+ * while the call is younger than `RUNNING_DURATION_AFTER_MS`. The interval callback is a no-op
+ * below that threshold, so a short command never triggers a redraw just for its footer.
+ */
+function spin(context: any, state: RowState): number | undefined {
+  const startedAt = (state.startedAt ??= Date.now());
   const id = String(context.toolCallId ?? "bash");
-  if (!spinners.has(id) && typeof context.invalidate === "function") {
+  if (!tickers.has(id) && typeof context.invalidate === "function") {
     const timer = setInterval(() => {
-      spinnerTick += 1;
+      if (Date.now() - startedAt < RUNNING_DURATION_AFTER_MS) return;
       context.invalidate?.();
-    }, SPINNER_INTERVAL_MS);
-    spinners.set(id, timer);
+    }, RUNNING_TICK_MS);
+    tickers.set(id, timer);
   }
-  state.startedAt ??= Date.now();
-  return Date.now() - state.startedAt;
+  const elapsedMs = Date.now() - startedAt;
+  return elapsedMs >= RUNNING_DURATION_AFTER_MS ? elapsedMs : undefined;
 }
 
 /**

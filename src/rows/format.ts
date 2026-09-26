@@ -18,10 +18,27 @@ export type ThemeLike = {
   bold(text: string): string;
 };
 
+/**
+ * The width authority a box is drawn with. A frame must be measured with the same table pi
+ * uses to lay it out: a glyph the fork's `measure.ts` counts as one column but pi counts as
+ * two (an emoji such as `✅`) makes a row one column too wide, and pi's `truncateToWidth`
+ * then clips the row's right border and appends `…`. Callers inside a pi runtime pass pi's
+ * own `visibleWidth`/`truncateToWidth` in; the dependency-free default keeps the pure tests
+ * and the frozen reference harness working.
+ */
+export type WidthMeasure = {
+  width(text: string): number;
+  clip(text: string, maxWidth: number, ellipsis?: string): string;
+};
+
+/** Width math from `measure.ts`; used when no pi runtime is available. */
+export const FORK_MEASURE: WidthMeasure = {
+  width: visibleWidth,
+  clip: (text, maxWidth, ellipsis = "…") => truncateStyled(text, maxWidth, ellipsis),
+};
+
 /** One collapsed tool call: fixed ends plus the one variable segment that gets clipped. */
 export type Row = {
-  /** Spinner glyph shown while a shell call is still running. */
-  spinner?: string;
   icon?: string;
   name: string;
   /** Flexible segment (path, command, pattern) — clipped in the middle. */
@@ -219,17 +236,14 @@ export function formatShellFooter(
 export function renderRow(row: Row, width: number, theme: ThemeLike): string {
   if (width <= 0) return "";
 
-  const spinner = row.spinner ? `${theme.fg("warning", row.spinner)} ` : "";
   const icon = row.icon
     ? row.shell
       ? theme.fg("toolTitle", theme.bold(row.icon))
       : theme.fg("dim", row.icon)
     : "";
-  const lead =
-    spinner +
-    [icon, row.shell ? "" : theme.fg("toolTitle", row.name)]
-      .filter((part) => part.length > 0)
-      .join(" ");
+  const lead = [icon, row.shell ? "" : theme.fg("toolTitle", row.name)]
+    .filter((part) => part.length > 0)
+    .join(" ");
 
   let tail = "";
   // The line range is glued to the value (`file.ts:1-40`) and stays visible when the
@@ -266,23 +280,24 @@ export function frameBox(
   options: BoxOptions,
   width: number,
   border: (text: string) => string,
+  measure: WidthMeasure = FORK_MEASURE,
 ): string[] {
   const titles = options.titleLines ?? (options.title ? [options.title] : []);
   const flat = [...titles, ...options.body, options.footer].filter((line): line is string =>
     Boolean(line),
   );
-  if (width < 16) return flat.map((line) => truncateStyled(line, width));
+  if (width < 16) return flat.map((line) => measure.clip(line, width));
 
   const inner = width - 4;
   const pad = (content: string): string => {
-    const clipped = truncateStyled(content, inner);
-    const gap = Math.max(0, inner - visibleWidth(clipped));
+    const clipped = measure.clip(content, inner);
+    const gap = Math.max(0, inner - measure.width(clipped));
     return border("│ ") + clipped + border(" ".repeat(gap)) + border(" │");
   };
 
   const label = options.separator ? `${options.separator} ` : "";
   // "├── " + label + fill + "┤" must total exactly `width`.
-  const separatorFill = Math.max(0, width - 5 - visibleWidth(label));
+  const separatorFill = Math.max(0, width - 5 - measure.width(label));
 
   const rows: string[] = [];
   rows.push(border(`╭${"─".repeat(Math.max(0, width - 2))}╮`));

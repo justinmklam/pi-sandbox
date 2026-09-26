@@ -6,20 +6,32 @@
  * glyph and pad is wrapped in the border colour separately, so a reset inside the output
  * text cannot bleed into the frame.
  */
-import { truncateToWidth } from "@earendil-works/pi-tui";
+import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 import { CONFIG } from "./config.ts";
 import {
   countWords,
   foldToOneLine,
   formatShellFooter,
+  FORK_MEASURE,
   frameBox,
   parseShellOutcome,
   shortenMiddle,
   wrapPlain,
   type ThemeLike,
+  type WidthMeasure,
 } from "./format.ts";
-import { visibleWidth } from "./measure.ts";
+
+/**
+ * pi's own width authority. The frame must be padded with the table pi lays it out with,
+ * because a glyph the fork's `measure.ts` counts as one column but pi counts as two (e.g.
+ * `✅`) would otherwise emit a row one column too wide, and pi's backstop would clip the
+ * right border and replace it with `…`.
+ */
+export const PI_MEASURE: WidthMeasure = {
+  width: visibleWidth,
+  clip: (text, maxWidth, ellipsis = "…") => truncateToWidth(text, maxWidth, ellipsis),
+};
 
 export type BashBoxInput = {
   command: string;
@@ -34,15 +46,19 @@ export type BashBoxInput = {
    */
   expanded?: boolean;
   /**
-   * In-progress call. Draws the same frame, but with a spinner + elapsed footer instead of an
-   * exit outcome, so a running command matches the finished box it settles into.
+   * In-progress call. Draws the same frame, but with a `Running` footer instead of an exit
+   * outcome, so a running command matches the finished box it settles into.
    */
   running?: boolean;
-  spinner?: string;
+  /** Elapsed milliseconds, or undefined while the call is too young to report a duration. */
   elapsedMs?: number;
 };
 
-export function renderBashBox(input: BashBoxInput, width: number): string[] {
+export function renderBashBox(
+  input: BashBoxInput,
+  width: number,
+  measure: WidthMeasure = FORK_MEASURE,
+): string[] {
   const { theme } = input;
   const outcome = parseShellOutcome(input.output, input.isError);
   const bodyText = outcome.body.replace(/\s+$/, "");
@@ -61,7 +77,7 @@ export function renderBashBox(input: BashBoxInput, width: number): string[] {
   for (const line of shown) body.push(theme.fg("toolOutput", line));
 
   const prompt = theme.fg("toolTitle", theme.bold("$"));
-  const promptWidth = visibleWidth(prompt) + 1;
+  const promptWidth = measure.width(prompt) + 1;
   // Inside padding is 4 columns ("│ " + " │"); the command gets what is left.
   const commandBudget = Math.max(1, width - 4 - promptWidth);
   const command = foldToOneLine(input.command);
@@ -75,12 +91,15 @@ export function renderBashBox(input: BashBoxInput, width: number): string[] {
       : `${theme.fg("accent", " ".repeat(promptWidth) + line)}`,
   );
 
-  // A running call has no exit outcome yet; the footer carries the spinner and elapsed time so
-  // the frame stays identical in shape to the settled box.
+  // A running call has no exit outcome yet; the footer carries the elapsed time so the frame
+  // stays identical in shape to the settled box. The duration is omitted until the caller has
+  // measured one, so the first ticks have no number to redraw.
   const footer = input.running
     ? theme.fg(
         "warning",
-        `${input.spinner ?? "…"} Running · ${Math.floor((input.elapsedMs ?? 0) / 1000)}s`,
+        input.elapsedMs === undefined
+          ? "Running"
+          : `Running · ${Math.floor(input.elapsedMs / 1000)}s`,
       )
     : formatShellFooter(outcome, input.durationMs, countWords(bodyText), theme);
 
@@ -95,12 +114,16 @@ export function renderBashBox(input: BashBoxInput, width: number): string[] {
     },
     width,
     (text) => theme.fg(input.isError ? "error" : "borderMuted", text),
+    measure,
   );
 }
 
 /** Minimal component contract: render lines for a width, and drop caches on invalidate. */
 export class BashBoxComponent {
   private input: BashBoxInput;
+  private cachedInput?: BashBoxInput;
+  private cachedWidth?: number;
+  private cachedLines?: string[];
 
   constructor(input: BashBoxInput) {
     this.input = input;
@@ -108,14 +131,28 @@ export class BashBoxComponent {
 
   update(input: BashBoxInput): void {
     this.input = input;
+    this.cachedInput = undefined;
   }
 
-  invalidate(): void {}
+  invalidate(): void {
+    this.cachedInput = undefined;
+  }
 
   render(width: number): string[] {
-    // Backstop: `renderBashBox` measures with `measure.ts`, but pi-tui is the authority on
-    // terminal width and aborts the whole frame if any line is even one column over. Re-clip
-    // with pi's own truncation so a glyph our width table disagrees about cannot crash the TUI.
-    return renderBashBox(this.input, width).map((line) => truncateToWidth(line, width, "…"));
+    // pi-tui renders every component on every frame, and re-parsing a settled box's whole
+    // output (ANSI strip + split) is the expensive part of that walk. The input object is
+    // replaced rather than mutated, so identity plus width is a sound cache key.
+    if (this.cachedLines && this.cachedInput === this.input && this.cachedWidth === width) {
+      return this.cachedLines;
+    }
+    // `renderBashBox` already pads with `PI_MEASURE`, so a well-formed frame needs no further
+    // clipping. This stays as a backstop because pi aborts the whole frame if any line is even
+    // one column over the terminal width.
+    this.cachedInput = this.input;
+    this.cachedWidth = width;
+    this.cachedLines = renderBashBox(this.input, width, PI_MEASURE).map((line) =>
+      truncateToWidth(line, width, "…"),
+    );
+    return this.cachedLines;
   }
 }

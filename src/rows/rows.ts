@@ -106,6 +106,8 @@ export function buildRow(name: ToolName, args: any, cwd: string): Row {
 export class RowText extends Text {
   private row: Row;
   private theme: ThemeLike;
+  private rowWidth?: number;
+  private rowLines?: string[];
 
   constructor(row: Row, theme: ThemeLike) {
     super("", 0, 0);
@@ -117,9 +119,24 @@ export class RowText extends Text {
   setRow(row: Row): void {
     this.row = row;
     this.setText("");
+    this.rowLines = undefined;
+  }
+
+  /**
+   * Clear the clipped-line cache. pi-tui renders every component on every frame, and this
+   * override bypasses `Text`'s own cache; without one, a long transcript re-clips all its
+   * rows continuously, and `truncateToWidth` grapheme-segments every styled row. A theme
+   * change calls `invalidate`, so cached styling cannot go stale.
+   */
+  override invalidate(): void {
+    super.invalidate();
+    this.rowLines = undefined;
   }
 
   override render(width: number): string[] {
-    return [truncateToWidth(renderRow(this.row, width, this.theme), width, "…")];
+    if (this.rowLines && this.rowWidth === width) return this.rowLines;
+    this.rowWidth = width;
+    this.rowLines = [truncateToWidth(renderRow(this.row, width, this.theme), width, "…")];
+    return this.rowLines;
   }
 }

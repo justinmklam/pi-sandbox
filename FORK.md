@@ -130,7 +130,8 @@ Then re-run the interactive gate with `pi -e ./index.ts` and confirm:
 1. A quiet command (`git add -A`) renders one row with `$ … ✓`.
 2. A noisy command renders a border-only box with an `Output` separator and an
    `Exit 0 · Xs · ~N words` footer, with no background fill. While it runs, the same frame is
-   drawn with a `⠋ Running · Ns` footer instead, so nothing shifts when it settles.
+   drawn with a `Running` footer instead (gaining `· Ns` after five seconds), so nothing
+   shifts when it settles.
 3. A failing command renders the same box in the error colour with `✘ Error`.
 4. `read`, `edit`, `write`, `grep`, `find`, `ls` each render one bare row.
 5. `Ctrl+O` expands every row. The six non-shell tools fall back to pi's built-in rendering

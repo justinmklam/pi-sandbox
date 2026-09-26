@@ -300,6 +300,42 @@ test("a streaming bash call renders the framed box with a running footer", () =>
   stopAllTimers();
 });
 
+test("the running box hides the duration until one has been measured", () => {
+  const render = (elapsedMs: number | undefined) =>
+    new BashBoxComponent({
+      command: "sleep 60",
+      output: "",
+      isError: false,
+      durationMs: undefined,
+      theme,
+      running: true,
+      elapsedMs,
+    })
+      .render(60)
+      .map(stripAnsi)
+      .join("\n");
+
+  const young = render(undefined);
+  assert.ok(young.includes("Running"), young);
+  assert.ok(!young.includes("Running ·"), `young call must not show a duration: ${young}`);
+  assert.ok(render(7_000).includes("Running · 7s"), render(7_000));
+});
+
+test("a settled shell result measures its duration in the same pass", () => {
+  // The box is drawn in the result slot, so `renderCall` never needs a second pass to pick the
+  // duration up (the `nudge` is skipped for bash).
+  const renderers: any = bashRowRenderers();
+  const out: any = renderers.renderResult(
+    { content: [{ type: "text", text: "done" }] },
+    { isPartial: false, expanded: false },
+    theme,
+    context({ args: { command: "sleep 1" }, state: { startedAt: Date.now() - 1500 } }),
+  );
+
+  const joined = out.render(60).map(stripAnsi).join("\n");
+  assert.match(joined, /Exit 0 · \d+\.\d\ds/, joined);
+});
+
 test("the bash result slot stays empty while the call is streaming", () => {
   const renderers: any = bashRowRenderers();
   const out: any = renderers.renderResult(
@@ -312,9 +348,11 @@ test("the bash result slot stays empty while the call is streaming", () => {
   assert.deepEqual(out.render(80), []);
 });
 
-test("the bash box re-clips with pi-tui so a width-table mismatch cannot overflow", () => {
-  // `✅` is one column in measure.ts but two in pi-tui; without the backstop the padded box
-  // would emit a line two columns wider than the terminal and pi would abort the render.
+test("an emoji body keeps each box row exactly the terminal width", () => {
+  // `✅` is one column in measure.ts but two in pi-tui. Laying the frame out with the fork's
+  // table padded such a row one column too wide, and pi's `truncateToWidth` backstop then
+  // clipped the right border and replaced it with `…` (visible as a broken frame). The box
+  // measures with pi now, so every row is exactly `width` and ends on its border glyph.
   const box = new BashBoxComponent({
     command: "echo probe",
     output: "✅✅",
@@ -325,10 +363,13 @@ test("the bash box re-clips with pi-tui so a width-table mismatch cannot overflo
   });
   for (const width of [40, 30, 20, 16]) {
     for (const line of box.render(width)) {
-      assert.ok(
-        piVisibleWidth(line) <= width,
-        `line is ${piVisibleWidth(line)} columns at width ${width}`,
+      const plain = stripAnsi(line);
+      assert.equal(
+        piVisibleWidth(line),
+        width,
+        `line is ${piVisibleWidth(line)} at ${width}: ${plain}`,
       );
+      assert.ok(/[│╮╯┤]$/.test(plain), `right border was clipped at width ${width}: ${plain}`);
     }
   }
 });
@@ -347,9 +388,9 @@ test("an expanded bash result with no output still shows the framed command", ()
   assert.ok(joined.includes("$ seq 1 3"), joined);
 });
 
-// --- spinner lifecycle -----------------------------------------------------------
+// --- running-call ticker lifecycle ------------------------------------------------
 
-test("a settled shell result clears its spinner interval before stopAllTimers", () => {
+test("a settled shell result clears its ticker interval before stopAllTimers", () => {
   const renderers: any = bashRowRenderers();
   const ctx = context({
     args: { command: "sleep 1" },
@@ -369,12 +410,12 @@ test("a settled shell result clears its spinner interval before stopAllTimers", 
     realClearTimeout(timer)) as typeof globalThis.clearTimeout;
 
   try {
-    // Registers the spinner interval.
+    // Registers the running-call ticker interval.
     renderers.renderCall({ command: "sleep 1" }, theme, ctx);
-    // Settling the result stops the spinner itself.
+    // Settling the result stops the ticker itself.
     renderers.renderResult({ content: [] }, { isPartial: false, expanded: false }, theme, ctx);
 
-    assert.ok(clearedIntervals.length >= 1, "the settled result must clear the spinner interval");
+    assert.ok(clearedIntervals.length >= 1, "the settled result must clear the ticker interval");
 
     const clearedBeforeNoop = clearedIntervals.length;
     stopAllTimers();
