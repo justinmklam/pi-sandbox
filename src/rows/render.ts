@@ -134,9 +134,19 @@ function renderCall(
 
   if (name === "edit") state.writeCall = undefined;
 
-  // `write` renders the written file in the call slot, so keep the built-in component
-  // when expanded (it caches its highlight state on `state.writeCall`).
-  if (name === "write" && context.expanded) {
+  // `write` renders the written file in the call slot, so keep the built-in component when
+  // expanded (it caches its highlight state on `state.writeCall`).
+  if (name === "write") {
+    // pi feeds a renderer the component it returned last pass (`lastComponent`), and the
+    // built-in `write` renderer keeps its incremental syntax-highlight cache on that
+    // component. Discarding it — as a collapsed row would, since it shows only the line
+    // count — makes every delta fall back to `rebuildWriteHighlightCacheFull`, which
+    // re-highlights the whole accumulated file. That is O(n²) over a stream and locks the
+    // UI for minutes on a large write, so skip the built-in entirely while collapsed and
+    // let expanding pay for a single rebuild.
+    if (!context.expanded) {
+      return new RowText(withMeta(buildRow(name, args, context.cwd), name, state, context), theme);
+    }
     const definition = defs.write as any;
     const component = (definition?.renderCall?.(args, theme, {
       ...context,

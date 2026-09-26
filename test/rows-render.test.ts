@@ -389,3 +389,79 @@ test("a settled shell result clears its spinner interval before stopAllTimers", 
     stopAllTimers();
   }
 });
+
+// --- streaming write cost --------------------------------------------------------
+
+/**
+ * The built-in `write` renderer keeps its incremental syntax-highlight cache on the
+ * component instance it returns, and pi feeds that instance back to the renderer as
+ * `lastComponent` on the next pass. A collapsed pi-sandbox row discards that component, so
+ * delegating to the built-in while collapsed dropped the cache and fell back to
+ * `rebuildWriteHighlightCacheFull` on every delta — a full re-highlight of the whole
+ * accumulated file, which is O(n²) over a stream and froze the UI for minutes on a large
+ * write. Collapsed rows show only the line count, so the built-in is now skipped entirely.
+ *
+ * `highlightCode` routes every token through `theme.fg("syntax*")` on the global theme, so
+ * counting those calls counts the highlighting work.
+ */
+test("a collapsed write row does no syntax highlighting while the stream grows", () => {
+  const THEME_KEY = Symbol.for("@earendil-works/pi-coding-agent:theme");
+  const previousTheme = (globalThis as any)[THEME_KEY];
+  let syntaxCalls = 0;
+  (globalThis as any)[THEME_KEY] = {
+    fg: (color: string, text: string) => {
+      if (color.startsWith("syntax")) syntaxCalls++;
+      return text;
+    },
+    bold: (text: string) => text,
+    italic: (text: string) => text,
+    underline: (text: string) => text,
+  };
+
+  try {
+    const { pi, tools } = fakePi();
+    installRowTools(pi, process.cwd());
+    const definition = tools.get("write");
+
+    const content = Array.from(
+      { length: 400 },
+      (_, i) => `const value_${i} = compute(${i}, "literal");`,
+    ).join("\n");
+
+    // One delta per line, handing the previous component back the way pi does.
+    let lastComponent: unknown;
+    for (let i = 1; i <= 400; i++) {
+      const args = { file_path: "src/f.ts", content: content.slice(0, (content.length / 400) * i) };
+      lastComponent = definition.renderCall(args, theme, context({ args, lastComponent }));
+    }
+
+    assert.equal(
+      syntaxCalls,
+      0,
+      "a collapsed write row must not highlight file content, or every delta re-highlights the file",
+    );
+
+    // Guard against a vacuous pass: the same spy must see the built-in's highlighting.
+    syntaxCalls = 0;
+    definition.renderCall({ file_path: "src/f.ts", content }, theme, context({ expanded: true }));
+    assert.ok(syntaxCalls > 0, "an expanded write row must still syntax-highlight");
+  } finally {
+    (globalThis as any)[THEME_KEY] = previousTheme;
+  }
+});
+
+test("a collapsed write row stays correct across a growing stream", () => {
+  const { pi, tools } = fakePi();
+  installRowTools(pi, process.cwd());
+  const definition = tools.get("write");
+
+  const lines = ["one", "two", "three", "four"];
+  let lastComponent: any;
+  for (let i = 1; i <= lines.length; i++) {
+    const args = { file_path: "src/b.ts", content: lines.slice(0, i).join("\n") };
+    lastComponent = definition.renderCall(args, theme, context({ args, lastComponent }));
+    const line = stripAnsi(lastComponent.render(100)[0] ?? "");
+    assert.ok(line.includes("src/b.ts"), line);
+    assert.ok(line.includes(`(${i} lines)`), `${i} lines: ${line}`);
+  }
+});
