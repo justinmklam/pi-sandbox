@@ -1,13 +1,11 @@
 import { type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Input, Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
-import {
-  DEFAULT_PERMISSION_PROMPT_TIMEOUT_SECONDS,
-  getConfigPaths,
-  type SandboxConfig,
-} from "./config.ts";
-import { allowsAllDomains, domainIsAllowed, matchesPattern } from "./policy.ts";
-import { type SessionAllowances } from "./sandbox-runtime.ts";
+import { type SessionAllowances } from "./nono.ts";
+import { domainIsAllowed, matchesPattern } from "./policy.ts";
+import { type ProfilePolicy, resolveProfilePath } from "./profile.ts";
+
+export const DEFAULT_PERMISSION_PROMPT_TIMEOUT_SECONDS = 10 * 60;
 
 export type PermissionChoice = "abort" | "session" | "project" | "global";
 
@@ -43,24 +41,24 @@ export function permissionPromptRemainingSeconds(deadlineMs: number, nowMs = Dat
   return Math.max(0, Math.ceil((deadlineMs - nowMs) / 1000));
 }
 
-export function permissionOptions(cwd: string): PromptOption[] {
-  const { globalPath, projectPath } = getConfigPaths(cwd);
+export function permissionOptions(): PromptOption[] {
+  const profilePath = resolveProfilePath();
   return [
     { label: "Allow for this session only", key: "s", action: "session" },
     { label: "Abort (keep blocked)", key: "esc", action: "abort" },
     {
-      label: "Allow for this project",
+      label: "Allow this project (saved to the nono profile)",
       key: "P",
       action: "project",
       confirm: true,
-      hint: `→ ${projectPath}`,
+      hint: `→ ${profilePath}`,
     },
     {
-      label: "Allow for all projects",
+      label: "Allow all projects (saved to the nono profile)",
       key: "A",
       action: "global",
       confirm: true,
-      hint: `→ ${globalPath}`,
+      hint: `→ ${profilePath}`,
     },
   ];
 }
@@ -78,7 +76,7 @@ export async function showPermissionPrompt(
   pi.events.emit("request-attention", { message: "Sandbox permission required" });
 
   const timeoutMs = permissionPromptTimeoutMs(timeoutSeconds);
-  const options = permissionOptions(ctx.cwd);
+  const options = permissionOptions();
   const result = await ctx.ui.custom<PermissionPromptResult>((tui, theme, _kb, done) => {
     const input = new Input();
     let selectedIndex = 0;
@@ -346,53 +344,29 @@ export function promptWriteBlock(
   );
 }
 
-export function warnIfAllDomainsAllowed(ctx: ExtensionContext, config: SandboxConfig): void {
-  if (!allowsAllDomains(config.network?.allowedDomains)) return;
-  ctx.ui.notify(
-    '⚠️ Network sandbox allows all domains because network.allowedDomains contains "*". ' +
-      'Only use this intentionally; remove "*" to restore per-domain prompts.',
-    "warning",
-  );
-}
-
-export function formatSandboxStatus(config: SandboxConfig): string {
-  const networkLabel = allowsAllDomains(config.network?.allowedDomains)
-    ? "all domains"
-    : `${config.network?.allowedDomains?.length ?? 0} domains`;
-  return `🔒 Sandbox: ${networkLabel}, ${config.filesystem?.allowWrite?.length ?? 0} write paths`;
-}
-
 export function formatSandboxConfiguration(
-  config: SandboxConfig,
-  paths: { globalPath: string; projectPath: string },
+  profilePath: string,
+  policy: ProfilePolicy,
   allowances: SessionAllowances,
 ): string {
   return [
     "Sandbox Configuration",
-    `  Project config: ${paths.projectPath}`,
-    `  Global config:  ${paths.globalPath}`,
+    `  Profile: ${profilePath}`,
     "",
     "Network (bash + !cmd):",
-    `  Allowed domains: ${config.network?.allowedDomains?.join(", ") || "(none)"}`,
-    ...(allowsAllDomains(config.network?.allowedDomains)
-      ? ['  ⚠️ "*" allows all domains and disables per-domain prompts.']
-      : []),
-    `  Denied domains:  ${config.network?.deniedDomains?.join(", ") || "(none)"}`,
+    `  Block network:   ${policy.blockNetwork ? "yes" : "no"}`,
+    `  Allowed domains: ${policy.allowedDomains.join(", ") || "(none in this profile)"}`,
     ...(allowances.domains.length ? [`  Session allowed: ${allowances.domains.join(", ")}`] : []),
     "",
     "Filesystem (bash + read/write/edit tools):",
-    `  Deny Read:   ${config.filesystem?.denyRead?.join(", ") || "(none)"}`,
-    `  Allow Read:  ${config.filesystem?.allowRead?.join(", ") || "(none)"}`,
-    `  Allow Write: ${config.filesystem?.allowWrite?.join(", ") || "(none)"}`,
-    `  Deny Write:  ${config.filesystem?.denyWrite?.join(", ") || "(none)"}`,
+    `  Allow (read+write): ${policy.allowWrite.join(", ") || "(none)"}`,
+    `  Allow read:         ${policy.allowRead.join(", ") || "(none)"}`,
     ...(allowances.readPaths.length ? [`  Session read:  ${allowances.readPaths.join(", ")}`] : []),
     ...(allowances.writePaths.length
       ? [`  Session write: ${allowances.writePaths.join(", ")}`]
       : []),
     "",
-    "Note: ALL reads are prompted unless the path is in allowRead or allowWrite.",
-    "Note: allowWrite also grants read access to the same path.",
-    "Note: denyRead is not a hard-block — granting a prompt adds to allowRead, overriding denyRead.",
-    "Note: denyWrite takes PRECEDENCE over allowWrite and is never prompted.",
+    "Policy lives in the nono profile; edit it and restart affected bash calls to apply.",
+    "Note: filesystem.deny must not overlap an allowed parent, or nono refuses to start on Linux.",
   ].join("\n");
 }

@@ -3,56 +3,37 @@
 Sandbox for [pi](https://pi.dev/).
 
 Sandboxes pi like this:
-- read/write/edit: direct control using allow/deny lists
-- bash: uses [`@carderne/sandbox-runtime`](https://www.npmjs.com/package/@carderne/sandbox-runtime) to control network and file system access
+- read/write/edit: direct control using the allowed paths in the nono profile
+- bash: runs through the `nono` CLI, so filesystem and network policy are enforced at the OS level
 
 When a blocked action is attempted, the user is
 prompted to allow it temporarily or permanently rather than silently failing.
 
 ![demo](./demo/demo.gif)
 
-## Notes
-There is an example config at [sandbox.json](./sandbox.json). It was quite a few things added to get this extension to work with [agent-browser](https://agent-browser.dev/) and other common tools.
-
-These open significant security loopholes, so shouldn't be used in a sensitive context or when you don't need browser support.
-
-You may need to trial and error to find additional things you need to allow.
-
 ## Quickstart
 
 #### Prerequisites
 
-`pi-sandbox` delegates the OS-level bash sandbox to
-[`@carderne/sandbox-runtime`](https://www.npmjs.com/package/@carderne/sandbox-runtime),
-published from the fork at <https://github.com/carderne/sandbox-runtime>,
-which is forked from Anthropic's
-[`anthropic-experimental/sandbox-runtime`](https://github.com/anthropic-experimental/sandbox-runtime).
-The sandbox runtime checks for [`ripgrep`](https://github.com/BurntSushi/ripgrep) (the
-`rg` binary) on **both macOS and Linux** at sandbox-init time. If `rg`
-is not on the `PATH` that pi was launched with, sandbox initialization
-fails with:
+`pi-sandbox` delegates the OS-level bash sandbox to the
+[`nono`](https://nono.sh) CLI. Install it, then confirm it can
+sandbox on this machine:
 
-```
-Sandbox initialization failed: Sandbox dependencies not available: ripgrep (rg) not found
+```bash
+nono --version             # 0.78.0 or newer
+nono setup --check-only    # on Linux, expect a "Landlock enabled" / "Landlock V6" line
 ```
 
-Install ripgrep before enabling the extension:
+On Linux, nono requires [Landlock](https://docs.kernel.org/userspace-api/landlock.html)
+(kernel 5.13+). On macOS it uses Seatbelt. Windows is not supported.
 
-| Platform | Install |
-|---|---|
-| macOS (Homebrew) | `brew install ripgrep` |
-| macOS (MacPorts) | `sudo port install ripgrep` |
-| Linux (Debian/Ubuntu) | `sudo apt install ripgrep` |
-| Linux (Fedora/RHEL) | `sudo dnf install ripgrep` |
-| Linux (Arch) | `sudo pacman -S ripgrep` |
-| From source / other | <https://github.com/BurntSushi/ripgrep#installation> |
+The filesystem and network policy live in a hand-authored nono profile. Pi never
+creates one for you: if the profile is missing or unreadable, bash is **refused**
+(fail-closed) rather than run unsandboxed. Create one first:
 
-If `which rg` succeeds in your shell but pi still reports `rg not
-found`, pi is being launched from a parent process whose `PATH` does
-not include the directory containing `rg` (common when GUI launchers
-inherit a minimal non-login `PATH`). On macOS, `/opt/homebrew/bin` and
-`/usr/local/bin` are the usual culprits — make sure your launcher's
-environment includes whichever one your install uses.
+```bash
+nono profile init pi --full    # writes ~/.config/nono/profiles/pi.json
+```
 
 #### Install
 ```bash
@@ -60,129 +41,121 @@ pi install npm:pi-sandbox
 ```
 
 #### Configure
-Add a config like this either to Pi's global agent directory (by default, `~/.pi/agent/sandbox.json`; respects `PI_CODING_AGENT_DIR`) or to `.pi/sandbox.json` (local).
-Scalar settings in the local config take precedence over global settings. The
-path and domain arrays from both files are combined and deduplicated, so a
-project can add permissions without repeating the global configuration. Built-in
-defaults are used for an array only when neither file configures it.
 
-Note below that the order of precedence for filesystem read and write are opposite.
+There is no sandbox config file: the nono profile is the single source of policy.
+Two environment variables cover the rest:
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `PI_SANDBOX_NONO_PROFILE` | `$XDG_CONFIG_HOME/nono/profiles/pi.json` (usually `~/.config/nono/profiles/pi.json`) | Path to the nono profile. |
+| `PI_SANDBOX_NONO` | `nono` | Path to the nono binary. |
+
+`--no-sandbox` is the only way to run bash unsandboxed for a session.
+
+## Profile authoring
+
+The profile is the single source of filesystem and network policy. `nono profile
+guide` and `nono profile schema` document the full schema; `pi-sandbox` uses these
+fields:
+
+| Field | Meaning |
+|-------|---------|
+| `workdir.access` | Access for the bash working directory: `read`, `write`, `readwrite`, or `none`. pi passes `--allow-cwd`, so this alone controls the project directory (it defaults to read-only, so set `readwrite` to let the agent edit the project). |
+| `filesystem.allow` | Read+write directories (recursive). |
+| `filesystem.read` | Read-only directories. |
+| `filesystem.write` | Write-only directories. |
+| `filesystem.allow_file` / `read_file` | Single-file read+write / read-only grants. |
+| `network.block` | `true` denies all outbound network access. |
+| `network.allow_domain` | Proxy allowlist (supports `*.example.com`). When non-empty, outbound traffic is filtered through nono's proxy. |
+| `network.open_port` | Allow connections to a TCP port. Needed for SSH, Postgres, and other non-HTTP protocols because there is no SOCKS proxy. |
+
+> **Deny-overlap rule:** on Linux, nono refuses to start if a `filesystem.deny`
+> path sits inside any allowed/read/write parent. Keep every `deny` entry outside
+> every allowed tree (for example `/Users` on a machine whose allowed roots are
+> elsewhere). `nono profile validate <path>` catches this before a session starts.
+
+A starting profile for JVM/Postgres workloads:
 
 ```json
 {
-  "enabled": true,
-  "sandboxUserShell": false,       // Sandbox commands entered with `!`. Defaults to true
-  "permissionPromptTimeoutSeconds": 600, // Defaults to 10 minutes; 0 waits indefinitely
-  "allowBrowserProcess": true,     // If you want to use agent-browser or similar Chrome setup
-  "network": {
-    "allowLocalBinding": true,     // ditto
-    "allowAllUnixSockets": true,   // ditto
-    "allowUnauthenticatedSocksProxy": true, // Enables Git-over-SSH on macOS
-    "allowedDomains": ["github.com", "*.github.com"],
-    "deniedDomains": []
-  },
+  "meta": { "name": "pi" },
+  "workdir": { "access": "readwrite" },
   "filesystem": {
-    // For READS:
-    // - ANY read is prompted unless the path is in allowRead or allowWrite
-    // - Granting a prompt adds to allowRead, which overrides denyRead
-    // - denyRead is not a hard-block; it just marks regions as denied by default
-    "denyRead": ["/Users", "/home"],
-    "allowRead": [".", "~/.config", "~/.local", "Library"],
-
-    // For WRITES:
-    // - allowWrite also grants read access to the same paths
-    // - empty ALLOW means no write access at all
-    // - DENY takes precedence and is never prompted
-    "allowWrite": [".", "/tmp"],
-    "denyWrite": [".env", ".env.*", "*.pem", "*.key"]
+    "allow": ["~/.ivy2", "~/.m2", "~/.sbt", "~/.gradle", "/dev/shm"],
+    "read": ["~/.cache/coursier"]
+  },
+  "network": {
+    "block": false,
+    "allow_domain": ["repo1.maven.org", "repo.maven.apache.org", "*.maven.org"],
+    "open_port": [5432]
   }
 }
 ```
 
-#### Usage
+Session grants (from permission prompts) are passed as `nono run` flags and
+compose additively with the profile. Approving a prompt with `project` or `global`
+scope writes back into the same configured profile, so a project that wants its
+own policy sets `PI_SANDBOX_NONO_PROFILE`.
+
+## Usage
 
 ```
-pi --no-sandbox                  disable sandboxing for the session
-Alt+S                            toggle sandboxing on/off for the session
-/sandbox                         show current configuration and session allowances
-/sandbox-enable                  enable the sandbox for this session
-/sandbox-disable                 disable the sandbox for this session
-/sandbox-allow domain <url>      prompt to add a domain to allowedDomains
-/sandbox-allow read <path>       prompt to add a path to allowRead
-/sandbox-allow write <path>      prompt to add a path to allowWrite
+pi --no-sandbox                            disable sandboxing for the session
+Alt+S                                      toggle sandboxing on/off for the session
+/sandbox                                   show the profile path and derived policy
+/sandbox-enable                            enable the sandbox for this session
+/sandbox-disable                           disable the sandbox for this session
+/sandbox-allow domain <url>                prompt to add a domain to network.allow_domain
+/sandbox-allow read <path>                 prompt to add a path to filesystem.read
+/sandbox-allow write <path>                prompt to add a path to filesystem.allow
 ```
 
 ## What it does
 
-**Bash commands** are wrapped with `sandbox-exec` (macOS) or `bubblewrap`
-(Linux) to enforce network and filesystem restrictions at the OS level. Commands
-entered with `!` are sandboxed by default; set `sandboxUserShell` to `false` to
-leave those commands unsandboxed.
+**Bash commands** are wrapped with `nono run -p <profile>`, which enforces network
+and filesystem restrictions with Landlock (Linux) or Seatbelt (macOS). Commands
+entered with `!` are sandboxed too.
 
-**Read, write, and edit tool calls** are intercepted before execution and
-checked against the same filesystem policy. The OS-level sandbox cannot cover
-these tools because they run directly in the Node.js process rather than in a
-subprocess.
+**Read, write, and edit tool calls** are intercepted before execution and checked
+against the allow paths from the *resolved* profile (`nono profile show --json`),
+so grants inherited through `extends` are honored. They run directly in the
+Node.js process, so the OS-level sandbox cannot cover them.
 
 When a block is triggered, a prompt appears with four options. Permission prompts
-automatically select **Abort (keep blocked)** after 10 minutes by default. Set
-`permissionPromptTimeoutSeconds` to a positive number to use a different timeout,
-or set it to `0` to wait indefinitely. A timeout never grants permission.
+automatically select **Abort (keep blocked)** after 10 minutes. A timeout never
+grants permission.
 
 - Abort (keep blocked)
 - Allow for this session only
-- Allow for this project — written to `.pi/sandbox.json`
-- Allow for all projects — written to Pi's global agent directory (by default, `~/.pi/agent/sandbox.json`; respects `PI_CODING_AGENT_DIR`)
+- Allow for this project — appended to the configured nono profile
+- Allow for all projects — appended to the configured nono profile
 
 **Session allowances** are held in memory only. They are never written to disk
 and the agent has no way to read or modify them. They are reset when the
 extension reloads or pi restarts. Parent agents and subagents have separate
-sandbox managers and session allowances; shutting down one does not affect another.
+session allowances.
 
-Saved project or global permission changes are not broadcast to other running
-sessions' sandbox managers. Restart affected sessions to apply grants or revocations
-consistently.
+Saved profile changes are not broadcast to other running sessions. Restart
+affected sessions to apply grants or revocations consistently.
 
 ### What is prompted vs. hard-blocked
 
 | Rule | Behaviour |
 |------|-----------|
-| Domain not in `allowedDomains` | Prompted (bash and `!cmd`, unless `sandboxUserShell` is disabled) |
-| Path not in `allowRead` or `allowWrite` | Prompted (read tool); granting adds to `allowRead` |
-| Path not in `allowWrite` | Prompted (write/edit tools and bash write failures) |
-| Path in `denyWrite` | Hard-blocked, no prompt |
-| Domain in `deniedDomains` | Hard-blocked at OS level, no prompt |
+| Domain not in `network.allow_domain` | Prompted (bash and `!cmd`) |
+| Path not allowed for reads | Prompted (read tool); granting adds to `filesystem.read` |
+| Path not allowed for writes | Prompted (write/edit tools and bash write failures); granting adds to `filesystem.allow` |
+| `network.block: true` | Hard-blocked at OS level, no prompt |
+| `filesystem.deny` (outside every allowed parent) | Hard-blocked at OS level, no prompt |
 
-If a path is added to `allowWrite` via a prompt but is also present in
-`denyWrite`, it remains blocked. A warning is shown explaining which config
-files to check.
+`network.allow_domain` supports `*.example.com` wildcards. A profile that neither
+blocks the network nor names any `allow_domain` leaves all outbound domains
+allowed (nono's default). With `extends`, these can be set in a parent profile, so
+pi-sandbox does not warn about it. The working directory is granted with
+`--allow-cwd` at the level set by `workdir.access`; `filesystem.allow` adds other
+directories by prefix match. Write access also implies read access.
 
-`allowedDomains` supports `*.example.com` wildcards. It also supports `"*"` to
-allow all domains; pi-sandbox shows a warning when this is configured because it
-removes per-domain prompts and can be easy to add accidentally. `allowWrite` uses prefix
-matching, so `.` covers the entire current working directory. Write access also
-implies read access; paths do not need to be repeated in `allowRead`.
-
-`allowUnauthenticatedSocksProxy` is enabled by default on macOS so Git-over-SSH
-works with the built-in `nc`. Domain filtering still applies, but another local process
-that discovers the temporary proxy port can use it while the sandbox is running.
-
-> **⚠️ Read and write have different precedence rules:**
->
-> - **Read:** Every read is prompted unless the path is in `allowRead` or `allowWrite`.
->   `denyRead` is not a hard-block — it marks regions as denied by default, but
->   granting a prompt adds the path to `allowRead`, overriding `denyRead`.
-> - **Write:** `denyWrite` takes precedence over `allowWrite` and is never
->   prompted. A path in `denyWrite` is always blocked, even if it matches
->   `allowWrite`.
-
-If neither file configures an array, its built-in defaults apply (see above for
-the defaults). Once an array is configured, only its combined global and local
-entries are used, so an explicit empty array disables that default.
-
-The footer shows a lock indicator while the sandbox is active.
-
-## Ackowledgements
+## Acknowledgements
 Based on code from
 [badlogic/pi-mono](https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/examples/extensions/sandbox/index.ts)
 by Mario Zechner, used under the

@@ -1,9 +1,18 @@
-# Fork notes: compact tool rows on top of pi-sandbox
+# Fork notes: compact tool rows + profile-backed nono sandbox
 
-This fork (`justinmklam/pi-sandbox`) adds compact, background-free rendering for pi's seven
-built-in tools on top of the upstream sandbox extension (`carderne/pi-sandbox`). It is kept
-cheap to rebase onto upstream: the rendering half lives in fork-only files, and the only
-upstream-tracked file it edits is `src/extension.ts`.
+This fork (`justinmklam/pi-sandbox`) makes two changes on top of the upstream sandbox
+extension (`carderne/pi-sandbox`):
+
+1. **Compact tool rows.** Background-free rendering for pi's seven built-in tools. This
+   half lives in fork-only files.
+2. **Profile-backed sandbox backend.** `@carderne/sandbox-runtime` (srt) is replaced by
+   the `nono` CLI driven by a hand-authored nono profile. Filesystem and network policy
+   lives only in the profile, and there is no `sandbox.json`; the two pi-side knobs
+   (the nono binary and the profile path) come from `PI_SANDBOX_NONO` /
+   `PI_SANDBOX_NONO_PROFILE`.
+
+The sandbox core is now fork-owned, so the old "the only upstream-tracked file it edits is
+`src/extension.ts`" rule no longer holds. See the delta inventory below.
 
 ## Install
 
@@ -85,8 +94,15 @@ pi list                                      # fork listed with its resolved pat
 pi -e ./index.ts --help | grep no-sandbox    # extension loaded (its flag is registered)
 ```
 
-Then run the interactive gate under [Sync procedure](#sync-procedure). Sandboxing requires
-`ripgrep`, as upstream does.
+Sandboxing requires the `nono` CLI and a nono profile. `pi-sandbox` never creates the profile:
+if it is missing or unreadable, bash is refused (fail-closed) until you create one:
+
+```bash
+nono profile init pi --full                  # writes ~/.config/nono/profiles/pi.json
+nono profile validate ~/.config/nono/profiles/pi.json
+```
+
+See the README for the profile fields this fork relies on.
 
 ### Uninstall
 
@@ -105,25 +121,36 @@ pi remove -l --approve /home/justinlam/Documents/pi-sandbox
 |---|---|---|
 | `src/rows/**` | fork-only | No upstream counterpart. Vendored from the frozen `ref/tool-rows/` snapshot, then adapted. This is the only live copy. |
 | `test/rows-format.test.ts`, `test/rows-render.test.ts` | fork-only | Ported gates for the row strings and the registration shape. |
-| `src/extension.ts` | upstream-tracked | Two additive hunks (+14/−7): the rows wiring (import at line 24, `...bashRowRenderers()` at line 181, `installRowTools(pi, localCwd)` at line 458) and a fork-only simplified footer status (`updateStatus` at lines 101–111 — `🔒 sandbox` when enabled, cleared when disabled — called on enable success, enable failure, disable, and both `--no-sandbox` / config-disabled paths). |
+| `src/profile.ts` | fork-only | Reads/validates the nono profile, derives the pi-side policy view, and writes approvals back without dropping unknown fields. |
+| `src/nono.ts` | fork-only | Builds the `nono run -p <profile>` argv, checks the binary, resolves the effective profile with `nono profile show --json` (so `extends` is honored for the in-process policy), and implements `BashOperations` (timeout/abort/stdio teardown). |
+| `test/profile.test.ts`, `test/nono.test.ts` | fork-only | Unit gates for the profile module and the nono backend. |
+| `src/config.ts` | deleted | No config file. The prompt-timeout default moved to `src/ui.ts`; the nono binary and profile path come from `PI_SANDBOX_NONO` / `PI_SANDBOX_NONO_PROFILE`. |
+| `src/extension.ts` | fork-owned | Removed the srt manager lifecycle; resolves the profile, wires the nono backend, refuses bash when the profile is missing, and keeps the fork-only `🔒 sandbox` footer status. Also carries the rows wiring. |
+| `src/ui.ts` | fork-owned | Renders the profile path and derived policy; `denyWrite`/`formatSandboxStatus` removed. |
+| `src/policy.ts` | fork-owned | `denyWrite` removed: the profile has no enforceable in-directory deny on Linux. |
+| `src/sandbox-runtime.ts` | deleted | Replaced by `src/nono.ts`. |
 | `ref/` | reference only | Frozen snapshot of the original tool-rows extension. Not a build input and never staged (untracked). Never treat it as the source of truth. |
 
-Rule for rebases: a conflict outside `src/extension.ts` means this fork drifted into an
-upstream-owned file. Undo that drift rather than resolving the conflict. The permitted hunks
-stay in `src/extension.ts` — the rows wiring and the footer status — so conflicts there stay
-local and small.
+Rule for rebases: a conflict outside this fork-owned set means the fork drifted into an
+upstream-only file. `src/rows/**` has no upstream counterpart and should never conflict;
+`src/extension.ts` carries both the rows wiring and the nono backend, so conflicts there are
+expected and stay local.
 
 Do not bump `package.json` `version`: upstream bumps it on release, and a fork-side bump would
-conflict on every sync. `src/config.ts`, `src/ui.ts`, and `sandbox.json` are untouched. The
-rendering toggles are code constants in `src/rows/config.ts`, not sandbox configuration, and
-the fork's footer no longer calls `src/ui.ts`'s `formatSandboxStatus` (that function remains
-exported upstream but is now unused here).
+conflict on every sync. The rendering toggles are code constants in `src/rows/config.ts`, not
+sandbox configuration.
 
 ## Sync procedure
 
 ```bash
 git fetch upstream && git rebase upstream/main && pnpm install && pnpm run all
 ```
+
+`pnpm run all` is the rebase gate: format, lint, typecheck, and the unit suite (which covers the
+profile module, the nono argv/exec backend, the write-policy helpers, and the row renderers).
+Upstream-tracking edits now live in `src/extension.ts`, `src/ui.ts`, and `src/policy.ts`, and both
+`src/sandbox-runtime.ts` and `src/config.ts` are deleted, so expect conflicts in all of them —
+resolve them in favor of this fork's nono backend.
 
 Then re-run the interactive gate with `pi -e ./index.ts` and confirm:
 
@@ -138,8 +165,8 @@ Then re-run the interactive gate with `pi -e ./index.ts` and confirm:
    (including diffs); the `bash` box stays framed and shows the whole command (wrapped) plus
    every output line. In fullscreen TUI mode (`tuiMode: "fullscreen"`) clicking a single row
    toggles just that row; regular mode never captures mouse input, so clicks do nothing there.
-6. **Sandbox survival:** a `bash` command writing outside `allowWrite` must still prompt
-   (or be refused in `--print` mode) and leave no file behind:
+6. **Sandbox survival:** a `bash` command writing outside the profile's allow list must still
+   prompt (or be refused in `--print` mode) and leave no file behind:
    `test ! -e ~/pi-sandbox-denied-probe.txt`.
 
 If step 6 ever shows a silent success, the renderer spread has broken the sandboxed

@@ -29,14 +29,13 @@ test("matches exact, wildcard, and all-domain policies", () => {
   assert.equal(allowsAllDomains(["*"]), true);
 });
 
-test("decides write policy from deny and allow lists", () => {
-  assert.equal(decideWritePolicy("/tmp/file", ["/tmp"], ["/tmp/file"]), "deny");
-  assert.equal(decideWritePolicy("/tmp/file", ["/tmp"], []), "allow");
-  assert.equal(decideWritePolicy("/tmp/file", ["/var"], []), "prompt");
-  assert.equal(decideWritePolicy("/tmp/file", [], []), "prompt");
+test("decides write policy from the allow list", () => {
+  assert.equal(decideWritePolicy("/tmp/file", ["/tmp"]), "allow");
+  assert.equal(decideWritePolicy("/tmp/file", ["/var"]), "prompt");
+  assert.equal(decideWritePolicy("/tmp/file", []), "prompt");
 });
 
-test("resolves write permission without prompting for denied or allowed paths", async () => {
+test("resolves write permission without prompting for allowed paths", async () => {
   const calls: string[] = [];
   const prompt = async () => {
     calls.push("prompt");
@@ -50,17 +49,6 @@ test("resolves write permission without prompting for denied or allowed paths", 
     await resolveWritePermission({
       path: "/tmp/file",
       allowWrite: ["/tmp"],
-      denyWrite: ["/tmp/file"],
-      prompt,
-      saveWritePermission: apply,
-    }),
-    { action: "deny" },
-  );
-  assert.deepEqual(
-    await resolveWritePermission({
-      path: "/tmp/file",
-      allowWrite: ["/tmp"],
-      denyWrite: [],
       prompt,
       saveWritePermission: apply,
     }),
@@ -75,7 +63,6 @@ test("resolves write permission prompt choices", async () => {
     await resolveWritePermission({
       path: "/tmp/file",
       allowWrite: [],
-      denyWrite: [],
       prompt: async () => ({ action: "abort", value: "/tmp/file" }),
       saveWritePermission: async (choice, value) => {
         applied.push(`${choice}:${value}`);
@@ -89,7 +76,6 @@ test("resolves write permission prompt choices", async () => {
     await resolveWritePermission({
       path: "/tmp/file",
       allowWrite: [],
-      denyWrite: [],
       prompt: async () => ({ action: "session", value: "/tmp" }),
       saveWritePermission: async (choice, value) => {
         applied.push(`${choice}:${value}`);

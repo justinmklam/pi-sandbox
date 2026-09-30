@@ -2,8 +2,11 @@ import { existsSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, resolve } from "node:path";
 
-export function decideWritePolicy(path: string, allowWrite: string[], denyWrite: string[]) {
-  if (matchesPattern(path, denyWrite)) return "deny";
+// NOTE: there is no per-path deny here. The nono profile's `filesystem.deny`
+// must not overlap an allowed parent, or nono refuses to start on Linux, so pi
+// cannot express an enforceable in-directory write deny. Decisions are allow or
+// prompt only.
+export function decideWritePolicy(path: string, allowWrite: string[]) {
   if (allowWrite.length === 0 || !matchesPattern(path, allowWrite)) return "prompt";
   return "allow";
 }
@@ -11,20 +14,18 @@ export function decideWritePolicy(path: string, allowWrite: string[], denyWrite:
 export async function resolveWritePermission({
   path,
   allowWrite,
-  denyWrite,
   prompt,
   saveWritePermission,
 }: {
   path: string;
   allowWrite: string[];
-  denyWrite: string[];
   prompt: (path: string) => Promise<{
     action: "abort" | "session" | "project" | "global";
     value: string;
   }>;
   saveWritePermission: (choice: "session" | "project" | "global", value: string) => Promise<void>;
 }) {
-  const policy = decideWritePolicy(path, allowWrite, denyWrite);
+  const policy = decideWritePolicy(path, allowWrite);
   if (policy !== "prompt") return { action: policy };
 
   const choice = await prompt(path);

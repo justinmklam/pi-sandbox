@@ -43,7 +43,7 @@ function session(cwd: string) {
       assert.deepEqual(errors, []);
     },
     async shutdown() {
-      await handlers.get("session_shutdown")!({ reason: "quit" }, ctx);
+      // The nono backend holds no cross-session state, so shutdown is inert.
     },
     async bash(command: string) {
       const result = await bash!.execute(
@@ -75,6 +75,21 @@ function session(cwd: string) {
   };
 }
 
+function writeProfile(root: string, agentDir: string): string {
+  mkdirSync(agentDir, { recursive: true });
+  const profilePath = join(agentDir, "pi.json");
+  writeFileSync(
+    profilePath,
+    JSON.stringify({
+      meta: { name: "pi" },
+      workdir: { access: "readwrite" },
+      filesystem: { allow: [root] },
+      network: { block: false },
+    }),
+  );
+  return profilePath;
+}
+
 test(
   "sandboxed bash respects shellCommandPrefix",
   {
@@ -84,27 +99,22 @@ test(
   async (t) => {
     const root = mkdtempSync(join(tmpdir(), "pi-sandbox-prefix-"));
     const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
-    process.env.PI_CODING_AGENT_DIR = join(root, "agent");
-    mkdirSync(process.env.PI_CODING_AGENT_DIR);
+    const originalProfile = process.env.PI_SANDBOX_NONO_PROFILE;
+    const agentDir = join(root, "agent");
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    process.env.PI_SANDBOX_NONO_PROFILE = writeProfile(root, agentDir);
     const prefixPath = join(root, "prefix.sh");
     writeFileSync(prefixPath, 'export PI_SANDBOX_PREFIX_TEST="prefix-ran"\n');
     writeFileSync(
-      join(process.env.PI_CODING_AGENT_DIR, "settings.json"),
+      join(agentDir, "settings.json"),
       JSON.stringify({ shellCommandPrefix: `source ${JSON.stringify(prefixPath)}` }),
     );
-    writeFileSync(
-      join(process.env.PI_CODING_AGENT_DIR, "sandbox.json"),
-      JSON.stringify({
-        enabled: true,
-        network: { allowedDomains: ["localhost"], deniedDomains: [] },
-        filesystem: { denyRead: [], allowRead: [], allowWrite: [root], denyWrite: [] },
-      }),
-    );
     const current = session(root);
-    t.after(async () => {
-      await current.shutdown();
+    t.after(() => {
       if (originalAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
       else process.env.PI_CODING_AGENT_DIR = originalAgentDir;
+      if (originalProfile === undefined) delete process.env.PI_SANDBOX_NONO_PROFILE;
+      else process.env.PI_SANDBOX_NONO_PROFILE = originalProfile;
       rmSync(root, { recursive: true, force: true });
     });
     await current.start();
@@ -121,31 +131,24 @@ test(
   async (t) => {
     const root = mkdtempSync(join(tmpdir(), "pi-sandbox-sessions-"));
     const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
-    process.env.PI_CODING_AGENT_DIR = join(root, "agent");
-    mkdirSync(process.env.PI_CODING_AGENT_DIR);
-    writeFileSync(
-      join(process.env.PI_CODING_AGENT_DIR, "sandbox.json"),
-      JSON.stringify({
-        enabled: true,
-        network: { allowedDomains: ["localhost"], deniedDomains: [] },
-        filesystem: { denyRead: [], allowRead: [], allowWrite: [root], denyWrite: [] },
-      }),
-    );
+    const originalProfile = process.env.PI_SANDBOX_NONO_PROFILE;
+    const agentDir = join(root, "agent");
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    process.env.PI_SANDBOX_NONO_PROFILE = writeProfile(root, agentDir);
     const parent = session(root);
     const child = session(root);
-    t.after(async () => {
-      await Promise.all([parent.shutdown(), child.shutdown()]);
+    t.after(() => {
       if (originalAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
       else process.env.PI_CODING_AGENT_DIR = originalAgentDir;
+      if (originalProfile === undefined) delete process.env.PI_SANDBOX_NONO_PROFILE;
+      else process.env.PI_SANDBOX_NONO_PROFILE = originalProfile;
       rmSync(root, { recursive: true, force: true });
     });
     await Promise.all([parent.start(), child.start()]);
-    const command = `printf '%s' "$GIT_SSH_COMMAND"`;
-    const parentProxy = await parent.bash(command);
-    assert.match(parentProxy, /ProxyCommand/);
-    assert.notEqual(parentProxy, await child.bash(command));
+    assert.equal(await parent.bash("printf parent-ok"), "parent-ok");
+    assert.equal(await child.bash("printf child-ok"), "child-ok");
     await child.shutdown();
-    assert.equal(await parent.bash(command), parentProxy);
-    assert.equal(await parent.userBash(command), parentProxy);
+    assert.equal(await parent.bash("printf parent-ok"), "parent-ok");
+    assert.equal(await parent.userBash("printf user-ok"), "user-ok");
   },
 );

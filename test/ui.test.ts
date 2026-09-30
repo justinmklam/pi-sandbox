@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import test from "node:test";
 
 import { type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -21,14 +22,31 @@ test("permissionPromptTimeoutMs defaults omission and enables only positive fini
   assert.equal(permissionPromptTimeoutMs(Number.MAX_VALUE), 2_147_483_647);
 });
 
-test("permissionOptions displays Pi's configured global path", () => {
-  const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
-  process.env.PI_CODING_AGENT_DIR = "/tmp/custom-pi-agent";
+test("permissionOptions displays the configured nono profile path", () => {
+  const originalProfile = process.env.PI_SANDBOX_NONO_PROFILE;
+  process.env.PI_SANDBOX_NONO_PROFILE = "~/custom-profiles/pi.json";
   try {
-    assert.equal(permissionOptions("/workspace")[3]?.hint, "→ /tmp/custom-pi-agent/sandbox.json");
+    const hint = permissionOptions()[3]?.hint ?? "";
+    assert.equal(hint.startsWith("→ "), true);
+    assert.equal(hint.endsWith(join("custom-profiles", "pi.json")), true);
   } finally {
-    if (originalAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
-    else process.env.PI_CODING_AGENT_DIR = originalAgentDir;
+    if (originalProfile === undefined) delete process.env.PI_SANDBOX_NONO_PROFILE;
+    else process.env.PI_SANDBOX_NONO_PROFILE = originalProfile;
+  }
+});
+
+test("permissionOptions defaults to the XDG profile path", () => {
+  const originalProfile = process.env.PI_SANDBOX_NONO_PROFILE;
+  const originalXdg = process.env.XDG_CONFIG_HOME;
+  delete process.env.PI_SANDBOX_NONO_PROFILE;
+  process.env.XDG_CONFIG_HOME = "/tmp/custom-xdg";
+  try {
+    assert.equal(permissionOptions()[3]?.hint, "→ /tmp/custom-xdg/nono/profiles/pi.json");
+  } finally {
+    if (originalProfile === undefined) delete process.env.PI_SANDBOX_NONO_PROFILE;
+    else process.env.PI_SANDBOX_NONO_PROFILE = originalProfile;
+    if (originalXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = originalXdg;
   }
 });
 
