@@ -2,7 +2,7 @@ import { type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-cod
 import { Input, Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 import { type SessionAllowances } from "./nono.ts";
-import { domainIsAllowed, matchesPattern } from "./policy.ts";
+import { domainIsAllowed, matchesPattern, ruleBreadthError } from "./policy.ts";
 import { type ProfilePolicy, resolveProfilePath } from "./profile.ts";
 
 export const DEFAULT_PERMISSION_PROMPT_TIMEOUT_SECONDS = 10 * 60;
@@ -291,9 +291,15 @@ export async function showPermissionPrompt(
   return result ?? { action: "abort", value: originalValue };
 }
 
-const validRule = (value: string, matches: boolean, target: string): string | null => {
+const validRule = (
+  value: string,
+  matches: boolean,
+  target: string,
+  deny: string[] = [],
+): string | null => {
   if (value.length === 0) return "Rule cannot be empty.";
-  return matches ? null : `Rule must match the blocked ${target}.`;
+  if (!matches) return `Rule must match the blocked ${target}.`;
+  return ruleBreadthError(value, deny);
 };
 
 export function promptDomainBlock(
@@ -316,6 +322,7 @@ export function promptReadBlock(
   pi: ExtensionAPI,
   ctx: ExtensionContext,
   path: string,
+  deny: string[],
   timeoutSeconds?: number,
 ): Promise<PermissionPromptResult> {
   return showPermissionPrompt(
@@ -323,7 +330,7 @@ export function promptReadBlock(
     ctx,
     `📖 Read blocked: "${path}" is not in allowRead`,
     path,
-    (value) => validRule(value, matchesPattern(path, [value]), `path "${path}"`),
+    (value) => validRule(value, matchesPattern(path, [value]), `path "${path}"`, deny),
     timeoutSeconds,
   );
 }
@@ -332,6 +339,7 @@ export function promptWriteBlock(
   pi: ExtensionAPI,
   ctx: ExtensionContext,
   path: string,
+  deny: string[],
   timeoutSeconds?: number,
 ): Promise<PermissionPromptResult> {
   return showPermissionPrompt(
@@ -339,7 +347,7 @@ export function promptWriteBlock(
     ctx,
     `📝 Write blocked: "${path}" is not in allowWrite`,
     path,
-    (value) => validRule(value, matchesPattern(path, [value]), `path "${path}"`),
+    (value) => validRule(value, matchesPattern(path, [value]), `path "${path}"`, deny),
     timeoutSeconds,
   );
 }
@@ -358,9 +366,10 @@ export function formatSandboxConfiguration(
     `  Allowed domains: ${policy.allowedDomains.join(", ") || "(none in this profile)"}`,
     ...(allowances.domains.length ? [`  Session allowed: ${allowances.domains.join(", ")}`] : []),
     "",
-    "Filesystem (bash + read/write/edit tools):",
+    "Filesystem (bash + read/write/edit/grep/find/ls tools):",
     `  Allow (read+write): ${policy.allowWrite.join(", ") || "(none)"}`,
     `  Allow read:         ${policy.allowRead.join(", ") || "(none)"}`,
+    `  Hard-denied:        ${policy.deny.length > 0 ? `${policy.deny.length} path(s) from filesystem.deny (no prompt)` : "(none)"}`,
     ...(allowances.readPaths.length ? [`  Session read:  ${allowances.readPaths.join(", ")}`] : []),
     ...(allowances.writePaths.length
       ? [`  Session write: ${allowances.writePaths.join(", ")}`]

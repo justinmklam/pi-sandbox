@@ -37,10 +37,13 @@ function grantFlag(path: string, write: boolean): string {
 /**
  * Build the `nono run` argv for one command.
  *
- * `--allow-cwd` makes nono apply the profile's `workdir.access` to the command's
- * working directory (nono requires it in non-interactive mode); filesystem and
- * network policy otherwise stay profile-owned, so no `--allow <cwd>` or
- * `--block-net` is appended. Session grants compose additively with the profile.
+ * `--allow-cwd` is the switch that lets the profile's `workdir.access` apply to the
+ * command's working directory; nono refuses to run non-interactively without it
+ * ("CWD access requires --allow-cwd in non-interactive mode"). The flag grants
+ * nothing on its own: an unset or `none` workdir level still denies the cwd.
+ * Filesystem and network policy otherwise stay profile-owned, so no
+ * `--allow <cwd>` or `--block-net` is appended. Session grants compose additively
+ * with the profile.
  */
 export function buildNonoArgv(
   profilePath: string,
@@ -86,30 +89,112 @@ export function resolveNonoPath(): string {
   return process.env.PI_SANDBOX_NONO?.trim() || "nono";
 }
 
+function stringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === "string");
+}
+
+/** Pull the JSON object out of nono's stdout, which may carry banner chatter. */
+function parseJsonObject(stdout: string): Record<string, unknown> | null {
+  const start = stdout.indexOf("{");
+  const end = stdout.lastIndexOf("}");
+  if (start === -1 || end <= start) return null;
+  try {
+    const parsed: unknown = JSON.parse(stdout.slice(start, end + 1));
+    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    // Not JSON after all; the caller reports the exit status instead.
+  }
+  return null;
+}
+
+/** nono prints update notices on stderr; keep only the real diagnostic. */
+function errorDetail(stderr: string | undefined): string {
+  const lines = (stderr ?? "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && !/^(update |\$ upgrade|https?:\/\/)/.test(line));
+  return lines[lines.length - 1] ?? "";
+}
+
+interface ProfileShowResult {
+  json: Record<string, unknown> | null;
+  status: number | null;
+  stderr: string;
+  error?: Error;
+}
+
+function runProfileShow(
+  nonoPath: string,
+  profilePath: string,
+  extraArgs: string[],
+): ProfileShowResult {
+  const result = spawnSync(
+    nonoPath,
+    ["-s", "profile", "show", "--json", ...extraArgs, profilePath],
+    {
+      encoding: "utf-8",
+    },
+  );
+  return {
+    json: parseJsonObject(typeof result.stdout === "string" ? result.stdout : ""),
+    status: result.status,
+    stderr: typeof result.stderr === "string" ? result.stderr : "",
+    error: result.error,
+  };
+}
+
+/**
+ * Hard-denied paths from the capability manifest. `nono profile show --json`
+ * reports only literal `filesystem.deny` entries, while the manifest expands the
+ * deny groups (`deny_credentials`, `deny_shell_history`, …) that actually stop
+ * bash. Best effort: a nono build without `--format manifest` still resolves.
+ */
+function manifestDenyPaths(nonoPath: string, profilePath: string): string[] {
+  const result = runProfileShow(nonoPath, profilePath, ["--format", "manifest"]);
+  const filesystem = result.json?.filesystem;
+  if (typeof filesystem !== "object" || filesystem === null) return [];
+  const deny = (filesystem as { deny?: unknown }).deny;
+  if (!Array.isArray(deny)) return [];
+  return deny
+    .map((entry) =>
+      typeof entry === "object" && entry !== null ? (entry as { path?: unknown }).path : undefined,
+    )
+    .filter((path): path is string => typeof path === "string");
+}
+
 /**
  * Resolve a profile with `nono profile show --json`, which follows `extends`,
  * platform overrides, and group merging. The in-process read/write/edit policy
  * must match what bash actually gets, so it cannot read the raw file alone.
- * Falls back to the raw file when nono cannot resolve it (bash will still report
- * the real resolution error at spawn time).
+ *
+ * A failed resolution is fatal rather than silently downgraded to the raw file:
+ * the raw file has no `extends` (so the base profile's grants vanish) and no
+ * `workdir`, which would make pi both narrower and more permissive than the
+ * policy nono enforces for bash.
  */
 export function resolveEffectiveProfile(nonoPath: string, profilePath: string): NonoProfile {
-  const result = spawnSync(nonoPath, ["profile", "show", "--json", profilePath], {
-    encoding: "utf-8",
-  });
-
-  if (result.status === 0 && typeof result.stdout === "string") {
-    try {
-      const parsed: unknown = JSON.parse(result.stdout);
-      if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
-        return parsed as NonoProfile;
-      }
-    } catch {
-      // Fall through to the raw profile below.
-    }
+  const result = runProfileShow(nonoPath, profilePath, []);
+  if (!result.json) {
+    const detail =
+      result.error?.message || errorDetail(result.stderr) || `exit status ${result.status}`;
+    throw new Error(`nono could not resolve the profile ${profilePath}: ${detail}`);
   }
 
-  return requireProfile(profilePath);
+  const profile = result.json as NonoProfile;
+  const manifestDeny = manifestDenyPaths(nonoPath, profilePath);
+  if (manifestDeny.length === 0) return profile;
+
+  const filesystem = profile.filesystem ?? {};
+  return {
+    ...profile,
+    filesystem: {
+      ...filesystem,
+      deny: unique([...stringArray(filesystem.deny), ...manifestDeny]),
+    },
+  };
 }
 
 const EXIT_STDIO_GRACE_MS = 100;

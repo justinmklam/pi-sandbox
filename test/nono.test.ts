@@ -223,7 +223,7 @@ test("resolveEffectiveProfile parses nono's resolved profile", () => {
   }
 });
 
-test("resolveEffectiveProfile falls back to the raw file when nono fails", () => {
+test("resolveEffectiveProfile fails closed instead of using the unresolved file", () => {
   const root = mkdtempSync(join(tmpdir(), "pi-sandbox-resolve-"));
   const profilePath = join(root, "pi.json");
   writeFileSync(
@@ -235,8 +235,66 @@ test("resolveEffectiveProfile falls back to the raw file when nono fails", () =>
   chmodSync(stub, 0o755);
 
   try {
-    const profile = resolveEffectiveProfile(stub, profilePath);
-    assert.deepEqual(profile.filesystem?.allow, ["/raw"]);
+    // The raw file here would widen cwd access and drop `extends`; never guess.
+    assert.throws(
+      () => resolveEffectiveProfile(stub, profilePath),
+      /could not resolve the profile/,
+    );
+    assert.throws(() => resolveEffectiveProfile(stub, profilePath), /boom/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("resolveEffectiveProfile reads JSON past chatter but rejects JSON-less output", () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-sandbox-resolve-"));
+  const profilePath = join(root, "pi.json");
+  writeFileSync(profilePath, JSON.stringify({ meta: { name: "pi" } }));
+  const noisy = join(root, "noisy");
+  writeFileSync(
+    noisy,
+    "#!/bin/sh\nprintf '%s\\n' 'banner noise' '{\"filesystem\":{\"read\":[\"/chatter\"]}}'\n",
+  );
+  chmodSync(noisy, 0o755);
+  const silent = join(root, "silent");
+  writeFileSync(silent, "#!/bin/sh\nexit 0\n");
+  chmodSync(silent, 0o755);
+
+  try {
+    assert.deepEqual(resolveEffectiveProfile(noisy, profilePath).filesystem?.read, ["/chatter"]);
+    assert.throws(() => resolveEffectiveProfile(silent, profilePath), /exit status 0/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("resolveEffectiveProfile merges the group-expanded manifest deny list", () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-sandbox-resolve-"));
+  const profilePath = join(root, "pi.json");
+  writeFileSync(
+    profilePath,
+    JSON.stringify({ meta: { name: "pi" }, filesystem: { deny: ["/literal"] } }),
+  );
+  const stub = join(root, "nono");
+  writeFileSync(
+    stub,
+    [
+      "#!/bin/sh",
+      'case "$*" in',
+      '  *--format*) printf \'%s\\n\' \'{"filesystem":{"deny":[{"path":"/home/u/.ssh"},{"path":"/home/u/.aws"}]}}\' ;;',
+      '  *) printf \'%s\\n\' \'{"filesystem":{"deny":["/literal"]}}\' ;;',
+      "esac",
+      "",
+    ].join("\n"),
+  );
+  chmodSync(stub, 0o755);
+
+  try {
+    assert.deepEqual(resolveEffectiveProfile(stub, profilePath).filesystem?.deny, [
+      "/literal",
+      "/home/u/.ssh",
+      "/home/u/.aws",
+    ]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

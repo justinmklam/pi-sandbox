@@ -61,7 +61,14 @@ export function domainIsAllowed(domain: string, allowedDomains: string[]): boole
 }
 
 function expandPath(filePath: string): string {
-  return resolve(filePath.replace(/^~(?=$|\/)/, homedir()));
+  const home = homedir();
+  // nono keeps `~`, `$HOME`, and `$WORKDIR` literal in `profile show --json`, so
+  // expand them here to match the absolute paths the tools pass in.
+  const expanded = filePath
+    .replace(/^~(?=$|\/)/, home)
+    .replace(/\$\{HOME\}|\$HOME\b/g, home)
+    .replace(/\$\{WORKDIR\}|\$WORKDIR\b/g, process.cwd());
+  return resolve(expanded);
 }
 
 export function canonicalizePath(filePath: string): string {
@@ -96,4 +103,30 @@ export function matchesPattern(filePath: string, patterns: string[]): boolean {
     const separator = absolutePattern.endsWith("/") ? "" : "/";
     return absolutePath === absolutePattern || absolutePath.startsWith(absolutePattern + separator);
   });
+}
+
+/**
+ * Whether the profile hard-denies a path. In nono, `filesystem.deny` (including the
+ * deny groups it expands to) overrides every grant, so the in-process tools must
+ * refuse the path outright instead of offering a prompt that cannot be honoured.
+ */
+export function isDeniedPath(path: string, deny: string[]): boolean {
+  return deny.length > 0 && matchesPattern(path, deny);
+}
+
+/**
+ * Reject a permission rule that would grant far more than the blocked target.
+ * `matchesPattern` treats any literal rule as a directory prefix, so a rule like
+ * `/` covers the whole filesystem and would reach the credential paths nono
+ * hard-denies for bash; `*` does the same for domains.
+ */
+export function ruleBreadthError(rule: string, deny: string[] = []): string | null {
+  if (rule === "/" || rule === "*") {
+    return `"${rule}" grants access to everything. Narrow it to a specific path or domain.`;
+  }
+  const covered = deny.find((path) => matchesPattern(path, [rule]));
+  if (covered !== undefined) {
+    return `This rule would also grant "${covered}", which the profile hard-denies. Narrow it.`;
+  }
+  return null;
 }

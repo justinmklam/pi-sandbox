@@ -1,3 +1,5 @@
+import { statSync } from "node:fs";
+
 import {
   type AgentToolResult,
   type ExtensionAPI,
@@ -23,14 +25,17 @@ import {
   canonicalizePath,
   domainIsAllowed,
   extractDomainsFromCommand,
+  isDeniedPath,
   matchesPattern,
   resolveWritePermission,
+  ruleBreadthError,
 } from "./policy.ts";
 import {
   addAllowPathToProfile,
   addDomainToProfile,
   addReadPathToProfile,
   effectivePolicy,
+  type NonoProfile,
   type ProfilePolicy,
   requireProfile,
   resolveProfilePath,
@@ -45,6 +50,24 @@ import {
   showPermissionPrompt,
   promptWriteBlock,
 } from "./ui.ts";
+
+const READ_TOOLS = ["read", "grep", "find", "ls"] as const;
+const WRITE_TOOLS = ["write", "edit"] as const;
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * The path a tool call targets. `read`/`write`/`edit` always name one; `grep`,
+ * `find`, and `ls` may omit it, in which case pi scopes the call to the cwd.
+ */
+function toolTargetPath(input: unknown): string | undefined {
+  if (typeof input !== "object" || input === null) return undefined;
+  const record = input as Record<string, unknown>;
+  const raw = record.path ?? record.file_path;
+  return typeof raw === "string" && raw.length > 0 ? raw : undefined;
+}
 
 export default function (pi: ExtensionAPI) {
   pi.registerFlag("no-sandbox", {
@@ -74,11 +97,40 @@ export default function (pi: ExtensionAPI) {
   const allowances: SessionAllowances = { domains: [], readPaths: [], writePaths: [] };
 
   const profilePathFor = (): string => resolveProfilePath();
-  // Resolve `extends` on each policy check so read/write/edit stay in lockstep with
-  // bash, which reads the live profile at every nono spawn. No snapshot/cache: a
-  // manual profile edit is picked up by the next tool call.
-  const policyFor = (): ProfilePolicy =>
-    effectivePolicy(resolveEffectiveProfile(nonoPath, profilePathFor()), allowances, localCwd);
+
+  /**
+   * Resolve `extends` on each policy check so read/write/edit stay in lockstep with
+   * bash, which reads the live profile at every nono spawn. Resolution follows
+   * `extends`, platform overrides, and deny groups, so it costs two nono spawns; the
+   * result is cached per profile file version and grants write the profile back
+   * (mtime/size change invalidates the cache). A resolution failure throws rather
+   * than falling back to the raw file: the unresolved file drops `extends` and has
+   * no `workdir`, so guessing from it would not be the policy nono enforces.
+   */
+  let resolvedCache: { key: string; profile: NonoProfile } | undefined;
+  function resolvedProfile(): NonoProfile {
+    const profilePath = profilePathFor();
+    requireProfile(profilePath);
+    const { mtimeMs, size } = statSync(profilePath);
+    const key = `${nonoPath}:${profilePath}:${mtimeMs}:${size}`;
+    if (resolvedCache?.key === key) return resolvedCache.profile;
+    const profile = resolveEffectiveProfile(nonoPath, profilePath);
+    resolvedCache = { key, profile };
+    return profile;
+  }
+  const policyFor = (): ProfilePolicy => effectivePolicy(resolvedProfile(), allowances, localCwd);
+  /** Resolve the live policy, or the message explaining why bash and tools stay blocked. */
+  const policyOrError = (): { policy: ProfilePolicy } | { error: string } => {
+    try {
+      return { policy: policyFor() };
+    } catch (error) {
+      return { error: errorMessage(error) };
+    }
+  };
+  const denyPaths = (): string[] => {
+    const resolved = policyOrError();
+    return "policy" in resolved ? resolved.policy.deny : [];
+  };
   const sessionFor = (): SessionAllowances => allowances;
 
   async function applyChoice(
@@ -127,6 +179,8 @@ export default function (pi: ExtensionAPI) {
     try {
       checkNonoAvailable(nonoPath);
       requireProfile(profilePathFor());
+      // Fail closed on a profile nono itself cannot resolve (bad `extends`, schema error).
+      resolvedProfile();
       if (setProxyEnvironment && supportsNodeEnvProxy(process.versions.node)) {
         process.env.NODE_USE_ENV_PROXY ??= "1";
       }
@@ -138,7 +192,7 @@ export default function (pi: ExtensionAPI) {
       // The sandbox is required, not optional: keep it marked on and refuse bash
       // until the profile problem is fixed or the user passes --no-sandbox.
       sandboxEnabled = true;
-      sandboxError = error instanceof Error ? error.message : String(error);
+      sandboxError = errorMessage(error);
       updateStatus(ctx, true);
       ctx.ui.notify(`Sandbox unavailable: ${sandboxError}`, "error");
       return false;
@@ -222,11 +276,31 @@ export default function (pi: ExtensionAPI) {
         const blockedPath = extractBlockedWritePath(output);
 
         if (blockedPath) {
+          const resolved = policyOrError();
+          if ("error" in resolved) {
+            return {
+              content: [{ type: "text", text: `Error: sandbox unavailable: ${resolved.error}` }],
+              details: {},
+            };
+          }
+          const { policy } = resolved;
           const path = canonicalizePath(blockedPath);
+          if (isDeniedPath(path, policy.deny)) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `Error: "${path}" is hard-denied by the nono profile (filesystem.deny) and cannot be granted.`,
+                },
+              ],
+              details: {},
+            };
+          }
           const writePermission = await resolveWritePermission({
             path,
-            allowWrite: policyFor().allowWrite,
-            prompt: (path) => promptWriteBlock(pi, ctx, path, promptTimeoutSeconds),
+            allowWrite: policy.allowWrite,
+            prompt: (target) =>
+              promptWriteBlock(pi, ctx, target, policy.deny, promptTimeoutSeconds),
             saveWritePermission: (choice, value) => applyChoice(choice, "write", value),
           });
           if (writePermission.action === "allow") {
@@ -264,8 +338,21 @@ export default function (pi: ExtensionAPI) {
       };
     }
 
+    const resolved = policyOrError();
+    if ("error" in resolved) {
+      return {
+        result: {
+          output: `Blocked: ${resolved.error}`,
+          exitCode: 1,
+          cancelled: false,
+          truncated: false,
+        },
+      };
+    }
+    const policy = resolved.policy;
+
     for (const domain of extractDomainsFromCommand(event.command)) {
-      if (!domainIsAllowed(domain, policyFor().allowedDomains)) {
+      if (!domainIsAllowed(domain, policy.allowedDomains)) {
         const choice = await promptDomainBlock(pi, ctx, domain, promptTimeoutSeconds);
         if (choice.action === "abort") {
           return {
@@ -294,9 +381,15 @@ export default function (pi: ExtensionAPI) {
       return { block: true, reason: `Sandbox unavailable: ${sandboxError}` };
     }
 
+    const resolvedPolicy = policyOrError();
+    if ("error" in resolvedPolicy) {
+      return { block: true, reason: `Sandbox unavailable: ${resolvedPolicy.error}` };
+    }
+    const policy = resolvedPolicy.policy;
+
     if (isToolCallEventType("bash", event)) {
       for (const domain of extractDomainsFromCommand(event.input.command)) {
-        if (!domainIsAllowed(domain, policyFor().allowedDomains)) {
+        if (!domainIsAllowed(domain, policy.allowedDomains)) {
           const choice = await promptDomainBlock(pi, ctx, domain, promptTimeoutSeconds);
           if (choice.action === "abort") {
             return {
@@ -309,24 +402,32 @@ export default function (pi: ExtensionAPI) {
       }
     }
 
-    if (isToolCallEventType("read", event)) {
-      const path = canonicalizePath(event.input.path);
-      if (!matchesPattern(path, policyFor().allowRead)) {
-        const choice = await promptReadBlock(pi, ctx, path, promptTimeoutSeconds);
-        if (choice.action === "abort") {
-          return { block: true, reason: `Sandbox: read access denied for "${path}"` };
-        }
-        await applyChoice(choice.action, "read", choice.value);
-        return;
-      }
+    // `read`, `grep`, `find`, and `ls` read through the pi process, and `write` and
+    // `edit` write through it: the OS sandbox cannot cover any of them, so they are
+    // checked against the resolved profile here.
+    const isRead = READ_TOOLS.some((name) => isToolCallEventType(name, event));
+    const isWrite = WRITE_TOOLS.some((name) => isToolCallEventType(name, event));
+    if (!isRead && !isWrite) return;
+
+    const target = toolTargetPath(event.input);
+    if (target === undefined && isWrite) {
+      return { block: true, reason: "Sandbox: the write target path could not be determined" };
+    }
+    const path = canonicalizePath(target ?? localCwd);
+
+    // A hard deny outranks every grant, so a prompt could never be honoured.
+    if (isDeniedPath(path, policy.deny)) {
+      return {
+        block: true,
+        reason: `Sandbox: "${path}" is hard-denied by the nono profile (filesystem.deny) and cannot be granted.`,
+      };
     }
 
-    if (isToolCallEventType("write", event) || isToolCallEventType("edit", event)) {
-      const path = canonicalizePath((event.input as { path: string }).path);
+    if (isWrite) {
       const writePermission = await resolveWritePermission({
         path,
-        allowWrite: policyFor().allowWrite,
-        prompt: (path) => promptWriteBlock(pi, ctx, path, promptTimeoutSeconds),
+        allowWrite: policy.allowWrite,
+        prompt: (blocked) => promptWriteBlock(pi, ctx, blocked, policy.deny, promptTimeoutSeconds),
         saveWritePermission: (choice, value) => applyChoice(choice, "write", value),
       });
       if (writePermission.action === "abort") {
@@ -335,9 +436,15 @@ export default function (pi: ExtensionAPI) {
           reason: `Sandbox: write access denied for "${path}" (not allowed by the profile)`,
         };
       }
-      if (writePermission.action === "granted") {
-        return;
+      return;
+    }
+
+    if (!matchesPattern(path, policy.allowRead)) {
+      const choice = await promptReadBlock(pi, ctx, path, policy.deny, promptTimeoutSeconds);
+      if (choice.action === "abort") {
+        return { block: true, reason: `Sandbox: read access denied for "${path}"` };
       }
+      await applyChoice(choice.action, "read", choice.value);
     }
   });
 
@@ -398,7 +505,8 @@ export default function (pi: ExtensionAPI) {
           if (!value) return "Rule cannot be empty.";
           const matches =
             kind === "domain" ? domainIsAllowed(target, [value]) : matchesPattern(target, [value]);
-          return matches ? null : `Rule must match "${target}".`;
+          if (!matches) return `Rule must match "${target}".`;
+          return ruleBreadthError(value, kind === "domain" ? [] : denyPaths());
         },
         promptTimeoutSeconds,
       );
@@ -423,7 +531,15 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.notify(`Sandbox unavailable: ${sandboxError}`, "error");
         return;
       }
-      ctx.ui.notify(formatSandboxConfiguration(profilePathFor(), policyFor(), allowances), "info");
+      const resolved = policyOrError();
+      if ("error" in resolved) {
+        ctx.ui.notify(`Sandbox unavailable: ${resolved.error}`, "error");
+        return;
+      }
+      ctx.ui.notify(
+        formatSandboxConfiguration(profilePathFor(), resolved.policy, allowances),
+        "info",
+      );
     },
   });
 

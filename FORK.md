@@ -121,13 +121,13 @@ pi remove -l --approve /home/justinlam/Documents/pi-sandbox
 |---|---|---|
 | `src/rows/**` | fork-only | No upstream counterpart. Vendored from the frozen `ref/tool-rows/` snapshot, then adapted. This is the only live copy. |
 | `test/rows-format.test.ts`, `test/rows-render.test.ts` | fork-only | Ported gates for the row strings and the registration shape. |
-| `src/profile.ts` | fork-only | Reads/validates the nono profile, derives the pi-side policy view, and writes approvals back without dropping unknown fields. |
-| `src/nono.ts` | fork-only | Builds the `nono run -p <profile>` argv, checks the binary, resolves the effective profile with `nono profile show --json` (so `extends` is honored for the in-process policy), and implements `BashOperations` (timeout/abort/stdio teardown). |
+| `src/profile.ts` | fork-only | Reads/validates the nono profile, derives the pi-side policy view (including `filesystem.deny` hard blocks), and writes approvals back without dropping unknown fields. |
+| `src/nono.ts` | fork-only | Builds the `nono run -p <profile>` argv, checks the binary, resolves the effective profile with `nono profile show --json` plus the capability manifest's expanded deny list (so `extends` and deny groups are honored for the in-process policy) and fails closed when nono cannot resolve it, and implements `BashOperations` (timeout/abort/stdio teardown). |
 | `test/profile.test.ts`, `test/nono.test.ts` | fork-only | Unit gates for the profile module and the nono backend. |
 | `src/config.ts` | deleted | No config file. The prompt-timeout default moved to `src/ui.ts`; the nono binary and profile path come from `PI_SANDBOX_NONO` / `PI_SANDBOX_NONO_PROFILE`. |
 | `src/extension.ts` | fork-owned | Removed the srt manager lifecycle; resolves the profile, wires the nono backend, refuses bash when the profile is missing, and keeps the fork-only `🔒 sandbox` footer status. Also carries the rows wiring. |
 | `src/ui.ts` | fork-owned | Renders the profile path and derived policy; `denyWrite`/`formatSandboxStatus` removed. |
-| `src/policy.ts` | fork-owned | `denyWrite` removed: the profile has no enforceable in-directory deny on Linux. |
+| `src/policy.ts` | fork-owned | `denyWrite` removed: deny rules live in the profile, and `filesystem.deny` now hard-blocks (no prompt) in `isDeniedPath`. Adds `ruleBreadthError` so a prompt cannot grant `/` or a rule that covers a denied path. |
 | `src/sandbox-runtime.ts` | deleted | Replaced by `src/nono.ts`. |
 | `ref/` | reference only | Frozen snapshot of the original tool-rows extension. Not a build input and never staged (untracked). Never treat it as the source of truth. |
 

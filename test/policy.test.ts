@@ -1,5 +1,5 @@
 import { mkdtempSync, mkdirSync, symlinkSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
@@ -11,8 +11,10 @@ import {
   decideWritePolicy,
   domainIsAllowed,
   extractDomainsFromCommand,
+  isDeniedPath,
   matchesPattern,
   resolveWritePermission,
+  ruleBreadthError,
 } from "../src/policy.ts";
 
 test("extracts and deduplicates literal HTTP domains", () => {
@@ -86,11 +88,37 @@ test("resolves write permission prompt choices", async () => {
   assert.deepEqual(applied, ["session:/tmp"]);
 });
 
+test("expands ~, $HOME, and $WORKDIR in patterns", () => {
+  const home = homedir();
+  assert.equal(matchesPattern(join(home, ".agents", "x.md"), ["$HOME/.agents"]), true);
+  assert.equal(matchesPattern(join(home, ".agents", "x.md"), ["~/.agents"]), true);
+  assert.equal(matchesPattern(join(process.cwd(), "docs", "a.md"), ["$WORKDIR/docs"]), true);
+  assert.equal(matchesPattern(join(home, "other", "x.md"), ["$HOME/.agents"]), false);
+});
+
 test("path patterns support directory prefixes and globs", () => {
   const root = canonicalizePath(mkdtempSync(join(tmpdir(), "pi-sandbox-policy-")));
   assert.equal(matchesPattern(join(root, "nested", "file.txt"), [root]), true);
   assert.equal(matchesPattern(join(root, "file.pem"), [join(root, "*.pem")]), true);
   assert.equal(matchesPattern(join(root, "file.txt"), [join(root, "*.pem")]), false);
+});
+
+test("hard denies outrank every grant and prompt", () => {
+  const deny = ["/home/u/.ssh", "/home/u/.aws/config"];
+  assert.equal(isDeniedPath("/home/u/.ssh/id_rsa", deny), true);
+  assert.equal(isDeniedPath("/home/u/.ssh", deny), true);
+  assert.equal(isDeniedPath("/home/u/.aws/config", deny), true);
+  assert.equal(isDeniedPath("/home/u/.ssh-backup", deny), false);
+  assert.equal(isDeniedPath("/tmp/file", deny), false);
+  assert.equal(isDeniedPath("/home/u/.ssh/id_rsa", []), false);
+});
+
+test("rejects permission rules that grant more than the blocked path", () => {
+  assert.match(ruleBreadthError("/") ?? "", /grants access to everything/);
+  assert.match(ruleBreadthError("*") ?? "", /grants access to everything/);
+  // A rule broad enough to cover a hard-denied path can never be honoured.
+  assert.match(ruleBreadthError("/home/u", ["/home/u/.ssh"]) ?? "", /would also grant/);
+  assert.equal(ruleBreadthError("/home/u/project/src", ["/home/u/.ssh"]), null);
 });
 
 test("canonicalizes symlinks and nonexistent descendants", () => {

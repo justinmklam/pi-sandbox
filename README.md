@@ -60,10 +60,10 @@ fields:
 
 | Field | Meaning |
 |-------|---------|
-| `workdir.access` | Access for the bash working directory: `read`, `write`, `readwrite`, or `none`. pi passes `--allow-cwd`, so this alone controls the project directory (it defaults to read-only, so set `readwrite` to let the agent edit the project). |
+| `workdir.access` | Access for the bash working directory: `read`, `write`, `readwrite`, or `none`. pi passes `--allow-cwd`, which is only the switch that lets this level apply (nono refuses to run non-interactively without it); the flag itself grants nothing. An **omitted** `workdir` resolves to `none`, so a hand-authored profile that never sets it gives the agent no access to the project at all — set `readwrite` to let it work in the repo. |
 | `filesystem.allow` | Read+write directories (recursive). |
 | `filesystem.read` | Read-only directories. |
-| `filesystem.write` | Write-only directories. |
+| `filesystem.write` | Write-only directories. nono's write grants do **not** imply read, so add a `read` entry too if the agent must read what it writes. |
 | `filesystem.allow_file` / `read_file` | Single-file read+write / read-only grants. |
 | `network.block` | `true` denies all outbound network access. |
 | `network.allow_domain` | Proxy allowlist (supports `*.example.com`). When non-empty, outbound traffic is filtered through nono's proxy. |
@@ -117,9 +117,16 @@ and filesystem restrictions with Landlock (Linux) or Seatbelt (macOS). Commands
 entered with `!` are sandboxed too.
 
 **Read, write, and edit tool calls** are intercepted before execution and checked
-against the allow paths from the *resolved* profile (`nono profile show --json`),
-so grants inherited through `extends` are honored. They run directly in the
+against the *resolved* profile (`nono profile show --json`), so grants inherited
+through `extends` are honored. `grep`, `find`, and `ls` are checked the same way,
+since they also read through the pi process. All of them run directly in the
 Node.js process, so the OS-level sandbox cannot cover them.
+
+Profile resolution is fail-closed. If `nono` cannot resolve the profile (a bad
+`extends`, a schema error), pi does **not** fall back to the raw file: it refuses
+bash and every sandboxed tool, and says so in the footer, until the profile
+resolves again. The raw file would drop `extends` and leave `workdir` unset, which
+is a different policy from the one nono enforces.
 
 When a block is triggered, a prompt appears with four options. Permission prompts
 automatically select **Abort (keep blocked)** after 10 minutes. A timeout never
@@ -143,17 +150,19 @@ affected sessions to apply grants or revocations consistently.
 | Rule | Behaviour |
 |------|-----------|
 | Domain not in `network.allow_domain` | Prompted (bash and `!cmd`) |
-| Path not allowed for reads | Prompted (read tool); granting adds to `filesystem.read` |
-| Path not allowed for writes | Prompted (write/edit tools and bash write failures); granting adds to `filesystem.allow` |
+| Path not allowed for reads | Prompted (`read`, `grep`, `find`, `ls`); granting adds to `filesystem.read` |
+| Path not allowed for writes | Prompted (`write`, `edit`, and bash write failures); granting adds to `filesystem.allow` |
 | `network.block: true` | Hard-blocked at OS level, no prompt |
-| `filesystem.deny` (outside every allowed parent) | Hard-blocked at OS level, no prompt |
+| `filesystem.deny`, including the `deny_credentials` / `deny_shell_history` groups it expands to | Hard-blocked, no prompt: pi reads the expanded list from nono's capability manifest and refuses the path, because a grant could never override it |
 
 `network.allow_domain` supports `*.example.com` wildcards. A profile that neither
 blocks the network nor names any `allow_domain` leaves all outbound domains
 allowed (nono's default). With `extends`, these can be set in a parent profile, so
 pi-sandbox does not warn about it. The working directory is granted with
 `--allow-cwd` at the level set by `workdir.access`; `filesystem.allow` adds other
-directories by prefix match. Write access also implies read access.
+directories by prefix match. A permission prompt accepts a rule broader than the
+blocked path (a parent directory, say), but not one that would also cover a
+hard-denied path: `/` and `*` are rejected outright.
 
 ## Acknowledgements
 Based on code from

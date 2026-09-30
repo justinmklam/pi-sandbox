@@ -37,6 +37,8 @@ export interface ProfilePolicy {
   allowedDomains: string[];
   allowRead: string[];
   allowWrite: string[];
+  /** Paths nono hard-denies (no prompt possible), including deny groups. */
+  deny: string[];
   blockNetwork: boolean;
 }
 
@@ -99,9 +101,9 @@ export function requireProfile(path: string): NonoProfile {
 /**
  * Derive the pi-side policy view from the profile plus in-memory session grants.
  *
- * `filesystem.allow` grants read+write, `read`/`write` grant their half. Write
- * access implies read access. Unknown profile fields are ignored here; nono owns
- * enforcement.
+ * `filesystem.allow` grants read+write, and `read`/`write` grant their half only:
+ * nono's write grants are write-only, so reading the same path still needs a read
+ * grant. Unknown profile fields are ignored here; nono owns enforcement.
  */
 export function effectivePolicy(
   profile: NonoProfile,
@@ -111,20 +113,32 @@ export function effectivePolicy(
   const allowed = stringArray(profile.filesystem?.allow);
   const read = stringArray(profile.filesystem?.read);
   const write = stringArray(profile.filesystem?.write);
+  // Single-file grants (`read_file`, etc.) count as exact-path allow entries.
+  const allowFile = stringArray(profile.filesystem?.allow_file);
+  const readFile = stringArray(profile.filesystem?.read_file);
+  const writeFile = stringArray(profile.filesystem?.write_file);
   const domains = stringArray(profile.network?.allow_domain);
   const blockNetwork = profile.network?.block === true;
+  // `filesystem.deny` (plus the group-expanded entries merged in by
+  // `resolveEffectiveProfile`) is an OS-level hard block: nono refuses the path
+  // and no permission prompt can override it.
+  const deny = unique(stringArray(profile.filesystem?.deny));
 
   // `--allow-cwd` makes nono apply profile.workdir.access to the command cwd.
   // Mirror that for the in-process read/write/edit tools, which never run nono:
-  // a missing access defaults to read-only, `none` grants nothing.
+  // nono resolves an unset `workdir` to `none` (`nono profile show`), so a
+  // missing level grants nothing, and `write` is write-only (it does not imply
+  // read the way `filesystem.allow` does).
   const access = profile.workdir?.access;
   const cwdScope = cwd ? [resolve(cwd)] : [];
-  const cwdReadable = cwdScope.length > 0 && access !== "none";
-  const cwdWritable = cwdScope.length > 0 && (access === "readwrite" || access === "write");
+  const cwdReadable = cwdScope.length > 0 && (access === "read" || access === "readwrite");
+  const cwdWritable = cwdScope.length > 0 && (access === "write" || access === "readwrite");
 
   const allowWrite = unique([
     ...allowed,
     ...write,
+    ...allowFile,
+    ...writeFile,
     ...session.writePaths,
     ...(cwdWritable ? cwdScope : []),
   ]);
@@ -134,12 +148,13 @@ export function effectivePolicy(
     allowRead: unique([
       ...allowed,
       ...read,
-      ...write,
+      ...allowFile,
+      ...readFile,
       ...session.readPaths,
-      ...allowWrite,
       ...(cwdReadable ? cwdScope : []),
     ]),
     allowWrite,
+    deny,
     blockNetwork,
   };
 }
