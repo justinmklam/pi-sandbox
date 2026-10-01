@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 
 import {
   addUnsandboxedCommand,
+  addUnsandboxedPrefix,
   hasUnsandboxedCommand,
   isPermissionError,
   loadUnsandboxedCommands,
@@ -47,6 +48,31 @@ test("matches project approvals in descendant directories", () => {
   }
 });
 
+test("matches safe command prefixes but rejects shell composition", () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-sandbox-command-policy-"));
+  const path = join(root, "sandbox.json");
+  writeFileSync(
+    path,
+    JSON.stringify({
+      commands: {
+        global: { prefixes: ["poetry run pytest"] },
+        directories: {},
+      },
+    }),
+  );
+  try {
+    const policy = loadUnsandboxedCommands(path);
+    assert.equal(hasUnsandboxedCommand("poetry run pytest", root, policy), true);
+    assert.equal(hasUnsandboxedCommand("poetry run pytest tests/ -k login", root, policy), true);
+    assert.equal(hasUnsandboxedCommand("poetry run pytests tests/", root, policy), false);
+    assert.equal(
+      hasUnsandboxedCommand("poetry run pytest tests/ && rm -rf /", root, policy),
+      false,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 test("persists project and global approvals without dropping other config", () => {
   const root = mkdtempSync(join(tmpdir(), "pi-sandbox-command-policy-"));
   const path = join(root, "nested", "sandbox.json");
@@ -58,11 +84,18 @@ test("persists project and global approvals without dropping other config", () =
     addUnsandboxedCommand("echo global", "global", root, policy, path);
     assert.equal(hasUnsandboxedCommand("npm run generate", join(root, "src"), policy), true);
     assert.equal(hasUnsandboxedCommand("echo global", "/elsewhere", policy), true);
+    addUnsandboxedPrefix("poetry run pytest", "project", root, policy, path);
+    assert.equal(hasUnsandboxedCommand("poetry run pytest tests/", root, policy), true);
     assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), {
       other: true,
       commands: {
-        global: ["echo global"],
-        directories: { [realpathSync.native(root)]: ["npm run generate"] },
+        global: { exact: ["echo global"], prefixes: [] },
+        directories: {
+          [realpathSync.native(root)]: {
+            exact: ["npm run generate"],
+            prefixes: ["poetry run pytest"],
+          },
+        },
       },
     });
   } finally {

@@ -2,23 +2,37 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from
 import { homedir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 
+interface CommandRulesConfig {
+  exact?: string[];
+  prefixes?: string[];
+}
+
 export interface SandboxCommandConfig {
   commands?:
     | string[]
     | {
-        global?: string[];
-        directories?: Record<string, string[]>;
+        global?: string[] | CommandRulesConfig;
+        directories?: Record<string, string[] | CommandRulesConfig>;
       };
   [key: string]: unknown;
 }
 
+export interface CommandRules {
+  exact: Set<string>;
+  prefixes: Set<string>;
+}
+
 export interface UnsandboxedCommandPolicy {
-  global: Set<string>;
-  directories: Map<string, Set<string>>;
+  global: CommandRules;
+  directories: Map<string, CommandRules>;
 }
 
 export function sandboxConfigPath(): string {
   return join(homedir(), ".pi", "agent", "sandbox.json");
+}
+
+function emptyRules(): CommandRules {
+  return { exact: new Set(), prefixes: new Set() };
 }
 
 function validCommands(value: unknown): string[] {
@@ -30,6 +44,16 @@ function validCommands(value: unknown): string[] {
       ),
     ),
   ];
+}
+
+function parseRules(value: unknown): CommandRules {
+  if (Array.isArray(value)) return { exact: new Set(validCommands(value)), prefixes: new Set() };
+  if (typeof value !== "object" || value === null) return emptyRules();
+  const config = value as CommandRulesConfig;
+  return {
+    exact: new Set(validCommands(config.exact)),
+    prefixes: new Set(validCommands(config.prefixes)),
+  };
 }
 
 function canonicalDirectory(path: string): string {
@@ -49,23 +73,35 @@ function directoryContains(directory: string, path: string): boolean {
   return path === directory || path.startsWith(`${directory}${sep}`);
 }
 
+function commandHasUnsafeShellSyntax(command: string): boolean {
+  return /[;&|<>\n\r`$()]/.test(command);
+}
+
+function rulesMatch(command: string, rules: CommandRules): boolean {
+  if (rules.exact.has(command)) return true;
+  if (commandHasUnsafeShellSyntax(command)) return false;
+  return [...rules.prefixes].some(
+    (prefix) => command === prefix || command.startsWith(`${prefix} `),
+  );
+}
+
 export function loadUnsandboxedCommands(path = sandboxConfigPath()): UnsandboxedCommandPolicy {
-  const policy: UnsandboxedCommandPolicy = { global: new Set(), directories: new Map() };
+  const policy: UnsandboxedCommandPolicy = { global: emptyRules(), directories: new Map() };
   try {
     const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return policy;
 
     const commands = (parsed as SandboxCommandConfig).commands;
     if (Array.isArray(commands)) {
-      // Read the previous flat format as global approvals.
-      policy.global = new Set(validCommands(commands));
+      // Read the previous flat format as global exact approvals.
+      policy.global = parseRules(commands);
       return policy;
     }
     if (typeof commands !== "object" || commands === null) return policy;
 
-    policy.global = new Set(validCommands(commands.global));
+    policy.global = parseRules(commands.global);
     for (const [directory, values] of Object.entries(commands.directories ?? {})) {
-      policy.directories.set(canonicalDirectory(directory), new Set(validCommands(values)));
+      policy.directories.set(canonicalDirectory(directory), parseRules(values));
     }
   } catch {
     // Missing or malformed config means no persistent approvals.
@@ -81,14 +117,38 @@ export function addUnsandboxedCommand(
   path = sandboxConfigPath(),
 ): void {
   if (scope === "global") {
-    policy.global.add(command);
+    policy.global.exact.add(command);
   } else {
     const directory = canonicalDirectory(cwd);
-    const commands = policy.directories.get(directory) ?? new Set<string>();
-    commands.add(command);
-    policy.directories.set(directory, commands);
+    const rules = policy.directories.get(directory) ?? emptyRules();
+    rules.exact.add(command);
+    policy.directories.set(directory, rules);
   }
+  writeCommandPolicy(policy, path);
+}
 
+export function addUnsandboxedPrefix(
+  prefix: string,
+  scope: "project" | "global",
+  cwd: string,
+  policy: UnsandboxedCommandPolicy,
+  path = sandboxConfigPath(),
+): void {
+  if (commandHasUnsafeShellSyntax(prefix)) {
+    throw new Error("Command prefixes cannot contain shell control syntax");
+  }
+  if (scope === "global") {
+    policy.global.prefixes.add(prefix);
+  } else {
+    const directory = canonicalDirectory(cwd);
+    const rules = policy.directories.get(directory) ?? emptyRules();
+    rules.prefixes.add(prefix);
+    policy.directories.set(directory, rules);
+  }
+  writeCommandPolicy(policy, path);
+}
+
+function writeCommandPolicy(policy: UnsandboxedCommandPolicy, path: string): void {
   let config: SandboxCommandConfig = {};
   try {
     const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
@@ -99,12 +159,16 @@ export function addUnsandboxedCommand(
     // Create the configuration if it does not exist or is not valid JSON.
   }
 
-  const directories: Record<string, string[]> = {};
-  for (const [directory, commands] of policy.directories) {
-    directories[directory] = [...commands];
+  const serialize = (rules: CommandRules): CommandRulesConfig => ({
+    exact: [...rules.exact],
+    prefixes: [...rules.prefixes],
+  });
+  const directories: Record<string, CommandRulesConfig> = {};
+  for (const [directory, rules] of policy.directories) {
+    directories[directory] = serialize(rules);
   }
   config.commands = {
-    global: [...policy.global],
+    global: serialize(policy.global),
     directories,
   };
   mkdirSync(dirname(path), { recursive: true });
@@ -116,10 +180,10 @@ export function hasUnsandboxedCommand(
   cwd: string,
   policy: UnsandboxedCommandPolicy,
 ): boolean {
-  if (policy.global.has(command)) return true;
+  if (rulesMatch(command, policy.global)) return true;
   const canonicalCwd = canonicalDirectory(cwd);
-  for (const [directory, commands] of policy.directories) {
-    if (directoryContains(directory, canonicalCwd) && commands.has(command)) return true;
+  for (const [directory, rules] of policy.directories) {
+    if (directoryContains(directory, canonicalCwd) && rulesMatch(command, rules)) return true;
   }
   return false;
 }

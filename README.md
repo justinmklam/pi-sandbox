@@ -57,13 +57,25 @@ sandbox are stored in `~/.pi/agent/sandbox.json` using this shape:
 ```json
 {
   "commands": {
-    "global": ["docker system prune"],
+    "global": {
+      "exact": ["docker system prune"],
+      "prefixes": ["poetry run pytest"]
+    },
     "directories": {
-      "/path/to/project": ["npm run generate"]
+      "/path/to/project": {
+        "exact": ["make build"],
+        "prefixes": ["poetry run pytest"]
+      }
     }
   }
 }
 ```
+
+Approvals can contain `exact` commands or safe `prefixes`. A prefix matches the
+whole command or the prefix followed by a space, so `poetry run pytest` matches
+additional pytest arguments but not `poetry run pytests`. Prefix matches reject
+shell composition such as pipes, redirects, command chaining, and substitutions.
+The older array form is still read as a list of exact commands.
 
 `--no-sandbox` is the only way to run bash unsandboxed for a session.
 
