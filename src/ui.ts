@@ -5,14 +5,19 @@ import { type SessionAllowances } from "./nono.ts";
 import { domainIsAllowed, matchesPattern, ruleBreadthError } from "./policy.ts";
 import { type ProfilePolicy, resolveProfilePath } from "./profile.ts";
 
-export const DEFAULT_PERMISSION_PROMPT_TIMEOUT_SECONDS = 10 * 60;
+export const DEFAULT_PERMISSION_PROMPT_TIMEOUT_SECONDS = 2 * 60;
 
-export type PermissionChoice = "abort" | "session" | "project" | "global";
+export type PermissionChoice = "abort" | "once" | "session" | "project" | "global";
 
-export interface PermissionPromptResult {
+export type PermissionPromptResult = {
   action: PermissionChoice;
   value: string;
-}
+};
+
+type ProfilePermissionPromptResult = {
+  action: Exclude<PermissionChoice, "once">;
+  value: string;
+};
 
 interface PromptOption {
   label: string;
@@ -39,6 +44,26 @@ export function permissionPromptTimeoutMs(timeoutSeconds: unknown): number | und
 
 export function permissionPromptRemainingSeconds(deadlineMs: number, nowMs = Date.now()): number {
   return Math.max(0, Math.ceil((deadlineMs - nowMs) / 1000));
+}
+
+export function unsandboxedCommandOptions(): PromptOption[] {
+  return [
+    { label: "Allow this command once outside the sandbox", key: "o", action: "once" },
+    { label: "Always allow outside the sandbox this session", key: "s", action: "session" },
+    {
+      label: "Always allow outside the sandbox in this project",
+      key: "P",
+      action: "project",
+      confirm: true,
+    },
+    {
+      label: "Always allow outside the sandbox globally",
+      key: "A",
+      action: "global",
+      confirm: true,
+    },
+    { label: "Abort (keep sandboxed and blocked)", key: "esc", action: "abort" },
+  ];
 }
 
 export function permissionOptions(): PromptOption[] {
@@ -70,13 +95,14 @@ export async function showPermissionPrompt(
   originalValue: string,
   validateValue: (value: string) => string | null,
   timeoutSeconds?: number,
+  customOptions?: PromptOption[],
 ): Promise<PermissionPromptResult> {
   if (!ctx.hasUI) return { action: "abort", value: originalValue };
 
   pi.events.emit("request-attention", { message: "Sandbox permission required" });
 
   const timeoutMs = permissionPromptTimeoutMs(timeoutSeconds);
-  const options = permissionOptions();
+  const options = customOptions ?? permissionOptions();
   const result = await ctx.ui.custom<PermissionPromptResult>((tui, theme, _kb, done) => {
     const input = new Input();
     let selectedIndex = 0;
@@ -307,7 +333,7 @@ export function promptDomainBlock(
   ctx: ExtensionContext,
   domain: string,
   timeoutSeconds?: number,
-): Promise<PermissionPromptResult> {
+): Promise<ProfilePermissionPromptResult> {
   return showPermissionPrompt(
     pi,
     ctx,
@@ -315,7 +341,7 @@ export function promptDomainBlock(
     domain,
     (value) => validRule(value, domainIsAllowed(domain, [value]), `domain "${domain}"`),
     timeoutSeconds,
-  );
+  ) as Promise<ProfilePermissionPromptResult>;
 }
 
 export function promptReadBlock(
@@ -324,7 +350,7 @@ export function promptReadBlock(
   path: string,
   deny: string[],
   timeoutSeconds?: number,
-): Promise<PermissionPromptResult> {
+): Promise<ProfilePermissionPromptResult> {
   return showPermissionPrompt(
     pi,
     ctx,
@@ -332,7 +358,7 @@ export function promptReadBlock(
     path,
     (value) => validRule(value, matchesPattern(path, [value]), `path "${path}"`, deny),
     timeoutSeconds,
-  );
+  ) as Promise<ProfilePermissionPromptResult>;
 }
 
 export function promptWriteBlock(
@@ -341,7 +367,7 @@ export function promptWriteBlock(
   path: string,
   deny: string[],
   timeoutSeconds?: number,
-): Promise<PermissionPromptResult> {
+): Promise<ProfilePermissionPromptResult> {
   return showPermissionPrompt(
     pi,
     ctx,
@@ -349,7 +375,7 @@ export function promptWriteBlock(
     path,
     (value) => validRule(value, matchesPattern(path, [value]), `path "${path}"`, deny),
     timeoutSeconds,
-  );
+  ) as Promise<ProfilePermissionPromptResult>;
 }
 
 export function formatSandboxConfiguration(

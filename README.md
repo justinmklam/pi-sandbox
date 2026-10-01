@@ -42,13 +42,28 @@ pi install npm:pi-sandbox
 
 #### Configure
 
-There is no sandbox config file: the nono profile is the single source of policy.
-Two environment variables cover the rest:
+The nono profile is the source of filesystem and network policy. Command approvals
+are stored separately in the pi-sandbox configuration file at
+`~/.pi/agent/sandbox.json`.
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
 | `PI_SANDBOX_NONO_PROFILE` | `$XDG_CONFIG_HOME/nono/profiles/pi.json` (usually `~/.config/nono/profiles/pi.json`) | Path to the nono profile. |
 | `PI_SANDBOX_NONO` | `nono` | Path to the nono binary. |
+
+Global and directory-specific approvals for running individual commands outside the
+sandbox are stored in `~/.pi/agent/sandbox.json` using this shape:
+
+```json
+{
+  "commands": {
+    "global": ["docker system prune"],
+    "directories": {
+      "/path/to/project": ["npm run generate"]
+    }
+  }
+}
+```
 
 `--no-sandbox` is the only way to run bash unsandboxed for a session.
 
@@ -182,13 +197,20 @@ resolves again. The raw file would drop `extends` and leave `workdir` unset, whi
 is a different policy from the one nono enforces.
 
 When a block is triggered, a prompt appears with four options. Permission prompts
-automatically select **Abort (keep blocked)** after 10 minutes. A timeout never
+automatically select **Abort (keep blocked)** after 2 minutes. A timeout never
 grants permission.
 
 - Abort (keep blocked)
 - Allow for this session only
 - Allow for this project — appended to the configured nono profile
 - Allow for all projects — appended to the configured nono profile
+
+If a bash command still fails with an OS-level permission error, pi offers a separate
+choice to run that exact command outside the sandbox once, for the current session,
+in the current project directory, or globally. Directory approvals apply to that
+directory and its descendants. Global command approvals are written to
+`~/.pi/agent/sandbox.json`; use this only for commands you trust to run without
+sandbox enforcement.
 
 **Session allowances** are held in memory only. They are never written to disk
 and the agent has no way to read or modify them. They are reset when the
@@ -205,6 +227,7 @@ affected sessions to apply grants or revocations consistently.
 | Domain not in `network.allow_domain` | Prompted (bash and `!cmd`) |
 | Path not allowed for reads | Prompted (`read`, `grep`, `find`, `ls`); granting adds to `filesystem.read` |
 | Path not allowed for writes | Prompted (`write`, `edit`, and bash write failures); granting adds to `filesystem.allow` |
+| Bash command receives `Operation not permitted` or `Permission denied` | Prompted to run the exact command outside the sandbox |
 | `network.block: true` | Hard-blocked at OS level, no prompt |
 | `filesystem.deny`, including the `deny_credentials` / `deny_shell_history` groups it expands to | Hard-blocked, no prompt: pi reads the expanded list from nono's capability manifest and refuses the path, because a grant could never override it |
 

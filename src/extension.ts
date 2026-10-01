@@ -13,6 +13,14 @@ import {
 import { Key } from "@earendil-works/pi-tui";
 
 import {
+  addUnsandboxedCommand,
+  hasUnsandboxedCommand,
+  isPermissionError,
+  loadUnsandboxedCommands,
+  sandboxConfigPath,
+  type UnsandboxedCommandPolicy,
+} from "./command-policy.ts";
+import {
   checkNonoAvailable,
   createNonoBashOps,
   extractBlockedWritePath,
@@ -48,6 +56,7 @@ import {
   promptDomainBlock,
   promptReadBlock,
   showPermissionPrompt,
+  unsandboxedCommandOptions,
   promptWriteBlock,
 } from "./ui.ts";
 
@@ -85,9 +94,9 @@ export default function (pi: ExtensionAPI) {
     shellPath: userShellPath,
   });
 
-  // There is no sandbox.json: the nono profile is the single source of policy,
-  // and these are the only pi-side settings. Override the binary or the profile
-  // path with PI_SANDBOX_NONO / PI_SANDBOX_NONO_PROFILE.
+  // The nono profile remains the source of filesystem and network policy. Pi-side
+  // approvals for commands explicitly allowed outside the sandbox live in
+  // ~/.pi/agent/sandbox.json.
   const nonoPath = resolveNonoPath();
   const promptTimeoutSeconds = DEFAULT_PERMISSION_PROMPT_TIMEOUT_SECONDS;
 
@@ -95,6 +104,8 @@ export default function (pi: ExtensionAPI) {
   /** Set when the profile or the nono binary could not be resolved; the sandbox fails closed. */
   let sandboxError: string | undefined;
   const allowances: SessionAllowances = { domains: [], readPaths: [], writePaths: [] };
+  const unsandboxedSessionCommands = new Set<string>();
+  const unsandboxedCommandPolicy: UnsandboxedCommandPolicy = loadUnsandboxedCommands();
 
   const profilePathFor = (): string => resolveProfilePath();
 
@@ -131,6 +142,45 @@ export default function (pi: ExtensionAPI) {
     const resolved = policyOrError();
     return "policy" in resolved ? resolved.policy.deny : [];
   };
+  async function allowCommandOutsideSandbox(
+    command: string,
+    ctx: ExtensionContext,
+  ): Promise<boolean> {
+    if (
+      unsandboxedSessionCommands.has(command) ||
+      hasUnsandboxedCommand(command, localCwd, unsandboxedCommandPolicy)
+    ) {
+      return true;
+    }
+
+    const choice = await showPermissionPrompt(
+      pi,
+      ctx,
+      `⚠️ Sandbox blocked this command. Run it outside the sandbox?\n${command}`,
+      command,
+      () => null,
+      promptTimeoutSeconds,
+      unsandboxedCommandOptions(),
+    );
+    if (choice.action === "abort") return false;
+    if (choice.action === "once") {
+      ctx.ui.notify("Command allowed outside the sandbox once", "info");
+    }
+    if (choice.action === "session") {
+      unsandboxedSessionCommands.add(command);
+      ctx.ui.notify("Command allowed outside the sandbox for this session", "info");
+    }
+    if (choice.action === "project") {
+      addUnsandboxedCommand(command, "project", localCwd, unsandboxedCommandPolicy);
+      ctx.ui.notify(`Command saved for this project in ${sandboxConfigPath()}`, "info");
+    }
+    if (choice.action === "global") {
+      addUnsandboxedCommand(command, "global", localCwd, unsandboxedCommandPolicy);
+      ctx.ui.notify(`Command saved globally in ${sandboxConfigPath()}`, "info");
+    }
+    return true;
+  }
+
   const sessionFor = (): SessionAllowances => allowances;
 
   async function applyChoice(
@@ -286,6 +336,9 @@ export default function (pi: ExtensionAPI) {
           const { policy } = resolved;
           const path = canonicalizePath(blockedPath);
           if (isDeniedPath(path, policy.deny)) {
+            if (await allowCommandOutsideSandbox(params.command, ctx)) {
+              return localBash.execute(id, params, signal, onUpdate, ctx);
+            }
             return {
               content: [
                 {
@@ -304,7 +357,7 @@ export default function (pi: ExtensionAPI) {
             saveWritePermission: (choice, value) => applyChoice(choice, "write", value),
           });
           if (writePermission.action === "allow") {
-            return runBash();
+            result = await runBash();
           }
           if (writePermission.action === "granted") {
             onUpdate?.({
@@ -316,9 +369,23 @@ export default function (pi: ExtensionAPI) {
               ],
               details: {},
             });
-            return runBash();
+            result = await runBash();
           }
         }
+      }
+
+      const output = result.content
+        .filter((content: any) => content.type === "text")
+        .map((content: any) => content.text)
+        .join("\n");
+      if (
+        sandboxEnabled &&
+        !sandboxError &&
+        ctx?.hasUI &&
+        isPermissionError(output) &&
+        (await allowCommandOutsideSandbox(params.command, ctx))
+      ) {
+        return localBash.execute(id, params, signal, onUpdate, ctx);
       }
       return result;
     },

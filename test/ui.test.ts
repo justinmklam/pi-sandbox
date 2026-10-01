@@ -8,11 +8,12 @@ import {
   permissionOptions,
   permissionPromptRemainingSeconds,
   permissionPromptTimeoutMs,
+  unsandboxedCommandOptions,
   showPermissionPrompt,
 } from "../src/ui.ts";
 
 test("permissionPromptTimeoutMs defaults omission and enables only positive finite timeouts", () => {
-  assert.equal(permissionPromptTimeoutMs(undefined), 600_000);
+  assert.equal(permissionPromptTimeoutMs(undefined), 120_000);
   assert.equal(permissionPromptTimeoutMs(0), undefined);
   assert.equal(permissionPromptTimeoutMs(-1), undefined);
   assert.equal(permissionPromptTimeoutMs(Number.NaN), undefined);
@@ -22,6 +23,18 @@ test("permissionPromptTimeoutMs defaults omission and enables only positive fini
   assert.equal(permissionPromptTimeoutMs(Number.MAX_VALUE), 2_147_483_647);
 });
 
+test("unsandboxedCommandOptions offers once, session, global, and abort", () => {
+  assert.deepEqual(
+    unsandboxedCommandOptions().map((option) => option.label),
+    [
+      "Allow this command once outside the sandbox",
+      "Always allow outside the sandbox this session",
+      "Always allow outside the sandbox in this project",
+      "Always allow outside the sandbox globally",
+      "Abort (keep sandboxed and blocked)",
+    ],
+  );
+});
 test("permissionOptions displays the configured nono profile path", () => {
   const originalProfile = process.env.PI_SANDBOX_NONO_PROFILE;
   process.env.PI_SANDBOX_NONO_PROFILE = "~/custom-profiles/pi.json";
