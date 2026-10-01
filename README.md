@@ -97,6 +97,59 @@ compose additively with the profile. Approving a prompt with `project` or `globa
 scope writes back into the same configured profile, so a project that wants its
 own policy sets `PI_SANDBOX_NONO_PROFILE`.
 
+### Credential proxy TLS trust
+
+When a profile uses nono credential injection, nono may route the command through a
+local TLS-intercepting proxy. `pi-sandbox` passes `--trust-proxy-ca` on every
+sandboxed Bash invocation so clients such as `pup` can validate certificates
+issued by that proxy. The flag is harmless when no credential or other
+TLS-intercepting route is active.
+
+This matters for requests such as:
+
+```bash
+nono run \
+  --profile ~/.config/nono/profiles/base.json \
+  --trust-proxy-ca \
+  -- pup dashboards get 4er-sx3-tes --output json
+```
+
+If Bash is already running inside a nono session, restart the outer session with
+`--trust-proxy-ca`; adding the flag to a command nested inside that session is too
+late to change the outer process's certificate trust.
+
+For a custom Datadog credential route, the injected header must use the scheme
+expected by Datadog:
+
+```json
+{
+  "datadog": {
+    "upstream": "https://api.datadoghq.com",
+    "credential_key": "cmd://datadog",
+    "env_var": "DD_ACCESS_TOKEN",
+    "inject_header": "Authorization",
+    "credential_format": "Bearer {}"
+  }
+}
+```
+
+`token {}` is not equivalent: it produces `Authorization: token <value>` rather
+than `Authorization: Bearer <value>`. A `nono-session-ca` certificate error occurs
+before Datadog authentication, so fix proxy trust first; it is not a Datadog
+permission error.
+
+### macOS and Linux differences
+
+| Area | macOS | Linux |
+|------|-------|-------|
+| Filesystem sandbox | Seatbelt | Landlock (Linux kernel 5.13+) |
+| Credential store | macOS Keychain | Linux Secret Service, such as `gnome-keyring` |
+| `--trust-proxy-ca` | Adds the proxy CA to the user trust store through Keychain. The first use may prompt for biometric/password approval; later runs reuse the CA until it expires. | No-op in nono; it does not add the proxy CA to a Linux system trust store. Configure the client’s CA bundle according to the nono credential-proxy documentation if it does not already trust the proxy CA. |
+| `filesystem.deny` overlap | No documented Linux-style startup restriction | nono refuses a profile when a deny path is inside an allowed/read/write parent |
+
+The platform differences do not change pi-sandbox’s command construction: Bash
+still receives the same `nono run` flags on both platforms. Windows is not supported.
+
 ## Usage
 
 ```
@@ -112,9 +165,9 @@ Alt+S                                      toggle sandboxing on/off for the sess
 
 ## What it does
 
-**Bash commands** are wrapped with `nono run -p <profile>`, which enforces network
-and filesystem restrictions with Landlock (Linux) or Seatbelt (macOS). Commands
-entered with `!` are sandboxed too.
+**Bash commands** are wrapped with `nono run -p <profile> --trust-proxy-ca`, which
+enforces network and filesystem restrictions with Landlock (Linux) or Seatbelt
+(macOS). Commands entered with `!` are sandboxed too.
 
 **Read, write, and edit tool calls** are intercepted before execution and checked
 against the *resolved* profile (`nono profile show --json`), so grants inherited

@@ -54,7 +54,7 @@ export function buildNonoArgv(
 ): string[] {
   const writePaths = unique(session.writePaths);
   const readPaths = unique(session.readPaths).filter((path) => !writePaths.includes(path));
-  const argv = ["run", "-s", "-p", profilePath, "--allow-cwd"];
+  const argv = ["run", "-s", "-p", profilePath, "--trust-proxy-ca", "--allow-cwd"];
 
   for (const path of writePaths) argv.push(grantFlag(path, true), path);
   for (const path of readPaths) argv.push(grantFlag(path, false), path);
