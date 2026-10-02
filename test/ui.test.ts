@@ -10,6 +10,7 @@ import {
   permissionPromptTimeoutMs,
   unsandboxedCommandOptions,
   showPermissionPrompt,
+  type PermissionPromptResult,
 } from "../src/ui.ts";
 
 test("permissionPromptTimeoutMs defaults omission and enables only positive finite timeouts", () => {
@@ -73,6 +74,63 @@ test("permissionPromptRemainingSeconds rounds up and stops at zero", () => {
   assert.equal(permissionPromptRemainingSeconds(deadlineMs, 11_000), 0);
 });
 
+test(
+  "serializes concurrent permission prompts so every request is eventually handled",
+  { timeout: 1_000 },
+  async () => {
+    type TestComponent = { dispose?(): void };
+    type PromptFactory<T> = (
+      tui: { requestRender(): void },
+      theme: { fg(color: string, text: string): string },
+      keybindings: object,
+      done: (result: T) => void,
+    ) => TestComponent;
+
+    let promptCount = 0;
+    let firstDone: ((result: PermissionPromptResult) => void) | undefined;
+    let secondDone: ((result: PermissionPromptResult) => void) | undefined;
+    let secondStarted = false;
+    const pi = {
+      events: { emit: () => undefined },
+    } as unknown as ExtensionAPI;
+    const ctx = {
+      cwd: "/workspace",
+      hasUI: true,
+      ui: {
+        custom: <T>(factory: PromptFactory<T>): Promise<T> =>
+          new Promise<T>((resolve) => {
+            const done = (result: T): void => resolve(result);
+            const component = factory(
+              { requestRender: () => undefined },
+              { fg: (_color, text) => text },
+              {},
+              done,
+            );
+            if (promptCount++ === 0) {
+              firstDone = done as (result: PermissionPromptResult) => void;
+            } else {
+              secondStarted = true;
+              secondDone = done as (result: PermissionPromptResult) => void;
+            }
+            component.dispose?.();
+          }),
+      },
+    } as unknown as ExtensionContext;
+
+    const first = showPermissionPrompt(pi, ctx, "First", "one", () => null, 0);
+    const second = showPermissionPrompt(pi, ctx, "Second", "two", () => null, 0);
+    await Promise.resolve();
+    assert.equal(secondStarted, false);
+
+    firstDone?.({ action: "session", value: "one" });
+    assert.deepEqual(await first, { action: "session", value: "one" });
+    await Promise.resolve();
+    assert.equal(secondStarted, true);
+
+    secondDone?.({ action: "abort", value: "two" });
+    assert.deepEqual(await second, { action: "abort", value: "two" });
+  },
+);
 test(
   "showPermissionPrompt safely aborts when its timeout expires",
   { timeout: 1_000 },

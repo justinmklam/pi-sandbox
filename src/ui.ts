@@ -28,6 +28,21 @@ interface PromptOption {
 }
 
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
+let permissionPromptQueue: Promise<void> = Promise.resolve();
+
+async function serializePermissionPrompt<T>(prompt: () => Promise<T>): Promise<T> {
+  const previous = permissionPromptQueue;
+  let release!: () => void;
+  permissionPromptQueue = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await previous;
+  try {
+    return await prompt();
+  } finally {
+    release();
+  }
+}
 
 export function permissionPromptTimeoutMs(timeoutSeconds: unknown): number | undefined {
   const resolvedTimeoutSeconds =
@@ -88,7 +103,7 @@ export function permissionOptions(): PromptOption[] {
   ];
 }
 
-export async function showPermissionPrompt(
+async function showPermissionPromptUnlocked(
   pi: ExtensionAPI,
   ctx: ExtensionContext,
   title: string,
@@ -315,6 +330,28 @@ export async function showPermissionPrompt(
   });
 
   return result ?? { action: "abort", value: originalValue };
+}
+
+export async function showPermissionPrompt(
+  pi: ExtensionAPI,
+  ctx: ExtensionContext,
+  title: string,
+  originalValue: string,
+  validateValue: (value: string) => string | null,
+  timeoutSeconds?: number,
+  customOptions?: PromptOption[],
+): Promise<PermissionPromptResult> {
+  return serializePermissionPrompt(() =>
+    showPermissionPromptUnlocked(
+      pi,
+      ctx,
+      title,
+      originalValue,
+      validateValue,
+      timeoutSeconds,
+      customOptions,
+    ),
+  );
 }
 
 const validRule = (

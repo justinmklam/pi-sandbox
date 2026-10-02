@@ -142,6 +142,22 @@ export default function (pi: ExtensionAPI) {
     const resolved = policyOrError();
     return "policy" in resolved ? resolved.policy.deny : [];
   };
+  function recordSandboxOverride(
+    kind: "command" | "domain" | "read" | "write",
+    value: string,
+    action: Exclude<PermissionPromptResult["action"], "abort">,
+  ): void {
+    pi.sendMessage(
+      {
+        customType: "sandbox-override",
+        content: `Sandbox override granted (${action}) for ${kind}: ${value}`,
+        display: true,
+        details: { action, kind, value, timestamp: Date.now() },
+      },
+      { triggerTurn: false },
+    );
+  }
+
   async function allowCommandOutsideSandbox(
     command: string,
     ctx: ExtensionContext,
@@ -178,6 +194,7 @@ export default function (pi: ExtensionAPI) {
       addUnsandboxedCommand(command, "global", localCwd, unsandboxedCommandPolicy);
       ctx.ui.notify(`Command saved globally in ${sandboxConfigPath()}`, "info");
     }
+    recordSandboxOverride("command", command, choice.action);
     return true;
   }
 
@@ -200,6 +217,7 @@ export default function (pi: ExtensionAPI) {
       if (!allowances.writePaths.includes(value)) allowances.writePaths.push(value);
       if (choice !== "session") addAllowPathToProfile(profilePath, value);
     }
+    recordSandboxOverride(kind, value, choice);
   }
 
   /**

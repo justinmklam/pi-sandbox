@@ -229,9 +229,13 @@ bash and every sandboxed tool, and says so in the footer, until the profile
 resolves again. The raw file would drop `extends` and leave `workdir` unset, which
 is a different policy from the one nono enforces.
 
-When a block is triggered, a prompt appears with four options. Permission prompts
-automatically select **Abort (keep blocked)** after 2 minutes. A timeout never
-grants permission.
+When a block is triggered, a prompt appears with four options. Permission prompts are
+serialized, so concurrent blocked commands are handled one at a time rather than
+competing for the single interactive prompt. Permission overrides granted manually
+are also recorded in the session as `sandbox-override` messages, including the
+command/path, scope, and timestamp, so the agent can distinguish a manual grant
+from normal sandboxed execution. Permission prompts automatically select **Abort
+(keep blocked)** after 2 minutes. A timeout never grants permission.
 
 - Abort (keep blocked)
 - Allow for this session only

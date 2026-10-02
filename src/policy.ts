@@ -95,9 +95,12 @@ export function canonicalizePath(filePath: string): string {
 export function matchesPattern(filePath: string, patterns: string[]): boolean {
   const absolutePath = canonicalizePath(filePath);
   return patterns.some((pattern) => {
-    const absolutePattern = pattern.includes("*") ? expandPath(pattern) : canonicalizePath(pattern);
+    const absolutePattern = canonicalizePath(pattern);
     if (pattern.includes("*")) {
-      const escaped = absolutePattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*");
+      const escaped = absolutePattern
+        .split("*")
+        .map((part) => part.replace(/[.+^${}()|[\]\\]/g, "\\$&"))
+        .join(".*");
       return new RegExp(`^${escaped}$`).test(absolutePath);
     }
     const separator = absolutePattern.endsWith("/") ? "" : "/";
