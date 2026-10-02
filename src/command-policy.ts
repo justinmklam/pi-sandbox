@@ -2,6 +2,8 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from
 import { homedir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 
+import { matchesPattern } from "./policy.ts";
+
 interface CommandRulesConfig {
   exact?: string[];
   prefixes?: string[];
@@ -69,8 +71,13 @@ function canonicalDirectory(path: string): string {
   return join(realpathSync.native(existing), ...suffix);
 }
 
-function directoryContains(directory: string, path: string): boolean {
+function directoryIsContained(directory: string, path: string): boolean {
   return path === directory || path.startsWith(`${directory}${sep}`);
+}
+
+function directoryMatches(directory: string, path: string): boolean {
+  if (directory.includes("*")) return matchesPattern(path, [directory]);
+  return directoryIsContained(directory, path);
 }
 
 function commandHasUnsafeShellSyntax(command: string): boolean {
@@ -101,7 +108,8 @@ export function loadUnsandboxedCommands(path = sandboxConfigPath()): Unsandboxed
 
     policy.global = parseRules(commands.global);
     for (const [directory, values] of Object.entries(commands.directories ?? {})) {
-      policy.directories.set(canonicalDirectory(directory), parseRules(values));
+      const key = directory.includes("*") ? directory : canonicalDirectory(directory);
+      policy.directories.set(key, parseRules(values));
     }
   } catch {
     // Missing or malformed config means no persistent approvals.
@@ -183,7 +191,7 @@ export function hasUnsandboxedCommand(
   if (rulesMatch(command, policy.global)) return true;
   const canonicalCwd = canonicalDirectory(cwd);
   for (const [directory, rules] of policy.directories) {
-    if (directoryContains(directory, canonicalCwd) && rulesMatch(command, rules)) return true;
+    if (directoryMatches(directory, canonicalCwd) && rulesMatch(command, rules)) return true;
   }
   return false;
 }

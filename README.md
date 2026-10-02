@@ -71,6 +71,27 @@ sandbox are stored in `~/.pi/agent/sandbox.json` using this shape:
 }
 ```
 
+Literal directory keys apply to that directory and its descendants. To share an
+approval across sibling Git worktrees, use an explicit `*` wildcard in the
+directory key:
+
+```json
+{
+  "commands": {
+    "directories": {
+      "/path/to/project*": {
+        "exact": ["make build"],
+        "prefixes": ["poetry run pytest"]
+      }
+    }
+  }
+}
+```
+
+This matches `/path/to/project`, `/path/to/project.branch`, and directories
+below those paths. Wildcards are opt-in; keep the prefix narrow because the rule
+can approve commands in multiple sibling directories.
+
 Approvals can contain `exact` commands or safe `prefixes`. A prefix matches the
 whole command or the prefix followed by a space, so `poetry run pytest` matches
 additional pytest arguments but not `poetry run pytests`. Prefix matches reject
@@ -219,10 +240,11 @@ grants permission.
 
 If a bash command still fails with an OS-level permission error, pi offers a separate
 choice to run that exact command outside the sandbox once, for the current session,
-in the current project directory, or globally. Directory approvals apply to that
-directory and its descendants. Global command approvals are written to
-`~/.pi/agent/sandbox.json`; use this only for commands you trust to run without
-sandbox enforcement.
+in the current project directory, or globally. Directory approvals apply to the
+configured directory and its descendants; explicit wildcard directory keys can
+also cover sibling worktrees as described above. Global command approvals are
+written to `~/.pi/agent/sandbox.json`; use this only for commands you trust to run
+without sandbox enforcement.
 
 **Session allowances** are held in memory only. They are never written to disk
 and the agent has no way to read or modify them. They are reset when the

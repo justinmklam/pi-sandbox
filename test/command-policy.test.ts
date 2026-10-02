@@ -48,6 +48,35 @@ test("matches project approvals in descendant directories", () => {
   }
 });
 
+test("matches explicit wildcard directory approvals for sibling worktrees", () => {
+  const parent = mkdtempSync(join(tmpdir(), "pi-sandbox-worktrees-"));
+  const project = join(parent, "platform-entity-data-lakehouse");
+  const worktree = join(parent, "platform-entity-data-lakehouse.justin-HIVE-3927-reset-eventing");
+  const unrelated = join(parent, "different-project");
+  mkdirSync(join(worktree, "src"), { recursive: true });
+  mkdirSync(unrelated);
+  const path = join(parent, "sandbox.json");
+  writeFileSync(
+    path,
+    JSON.stringify({
+      commands: {
+        global: [],
+        directories: {
+          [`${project}*`]: { exact: ["make test"] },
+        },
+      },
+    }),
+  );
+  try {
+    const policy = loadUnsandboxedCommands(path);
+    assert.equal(hasUnsandboxedCommand("make test", project, policy), true);
+    assert.equal(hasUnsandboxedCommand("make test", join(worktree, "src"), policy), true);
+    assert.equal(hasUnsandboxedCommand("make test", unrelated, policy), false);
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
 test("matches safe command prefixes but rejects shell composition", () => {
   const root = mkdtempSync(join(tmpdir(), "pi-sandbox-command-policy-"));
   const path = join(root, "sandbox.json");
