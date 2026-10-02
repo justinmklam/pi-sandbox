@@ -5,7 +5,7 @@ import { type SessionAllowances } from "./nono.ts";
 import { domainIsAllowed, matchesPattern, ruleBreadthError } from "./policy.ts";
 import { type ProfilePolicy, resolveProfilePath } from "./profile.ts";
 
-export const DEFAULT_PERMISSION_PROMPT_TIMEOUT_SECONDS = 2 * 60;
+export const DEFAULT_PERMISSION_PROMPT_TIMEOUT_SECONDS = 30;
 
 export type PermissionChoice = "abort" | "once" | "session" | "project" | "global";
 
