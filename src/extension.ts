@@ -7,6 +7,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import {
   createBashToolDefinition,
+  createLocalBashOperations,
   isToolCallEventType,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
@@ -89,6 +90,7 @@ export default function (pi: ExtensionAPI) {
   const settings = SettingsManager.create(localCwd);
   const userShellPath = settings.getShellPath();
   const shellCommandPrefix = settings.getShellCommandPrefix();
+  const localBashOperations = createLocalBashOperations({ shellPath: userShellPath });
   const localBash = createBashToolDefinition(localCwd, {
     commandPrefix: shellCommandPrefix,
     shellPath: userShellPath,
@@ -105,7 +107,7 @@ export default function (pi: ExtensionAPI) {
   let sandboxError: string | undefined;
   const allowances: SessionAllowances = { domains: [], readPaths: [], writePaths: [] };
   const unsandboxedSessionCommands = new Set<string>();
-  const unsandboxedCommandPolicy: UnsandboxedCommandPolicy = loadUnsandboxedCommands();
+  let unsandboxedCommandPolicy: UnsandboxedCommandPolicy = loadUnsandboxedCommands();
 
   const profilePathFor = (): string => resolveProfilePath();
 
@@ -142,6 +144,21 @@ export default function (pi: ExtensionAPI) {
     const resolved = policyOrError();
     return "policy" in resolved ? resolved.policy.deny : [];
   };
+  function debugSandbox(message: string, details: Record<string, unknown> = {}): void {
+    if (process.env.PI_SANDBOX_DEBUG !== "1") return;
+    const content = `[pi-sandbox-debug] ${message} ${JSON.stringify(details)}`;
+    console.error(content);
+    pi.sendMessage(
+      {
+        customType: "sandbox-debug",
+        content,
+        display: true,
+        details,
+      },
+      { triggerTurn: false },
+    );
+  }
+
   function recordSandboxOverride(
     kind: "command" | "domain" | "read" | "write",
     value: string,
@@ -158,14 +175,37 @@ export default function (pi: ExtensionAPI) {
     );
   }
 
+  function commandIsAllowedOutsideSandbox(command: string): boolean {
+    unsandboxedCommandPolicy = loadUnsandboxedCommands();
+    const matched =
+      unsandboxedSessionCommands.has(command) ||
+      hasUnsandboxedCommand(command, localCwd, unsandboxedCommandPolicy);
+    debugSandbox("command-policy-check", {
+      command,
+      cwd: localCwd,
+      configPath: sandboxConfigPath(),
+      matched,
+      sessionMatch: unsandboxedSessionCommands.has(command),
+      globalExact: [...unsandboxedCommandPolicy.global.exact],
+      globalPrefixes: [...unsandboxedCommandPolicy.global.prefixes],
+      globalUnsafePrefixes: [...unsandboxedCommandPolicy.global.unsafePrefixes],
+      directories: [...unsandboxedCommandPolicy.directories.entries()].map(
+        ([directory, rules]) => ({
+          directory,
+          exact: [...rules.exact],
+          prefixes: [...rules.prefixes],
+          unsafePrefixes: [...rules.unsafePrefixes],
+        }),
+      ),
+    });
+    return matched;
+  }
+
   async function allowCommandOutsideSandbox(
     command: string,
     ctx: ExtensionContext,
   ): Promise<boolean> {
-    if (
-      unsandboxedSessionCommands.has(command) ||
-      hasUnsandboxedCommand(command, localCwd, unsandboxedCommandPolicy)
-    ) {
+    if (commandIsAllowedOutsideSandbox(command)) {
       return true;
     }
 
@@ -293,12 +333,20 @@ export default function (pi: ExtensionAPI) {
     label: "bash (sandboxed)",
     async execute(id, params, signal, onUpdate, ctx) {
       // Fail closed: a missing or unreadable profile must not fall back to
-      // unsandboxed bash. Only --no-sandbox runs unsandboxed.
+      // unsandboxed bash. Only an explicit command allowance or --no-sandbox runs unsandboxed.
       if (sandboxEnabled && sandboxError) {
         return {
           content: [{ type: "text", text: `Error: sandbox unavailable: ${sandboxError}` }],
           details: {},
         };
+      }
+
+      if (sandboxEnabled && commandIsAllowedOutsideSandbox(params.command)) {
+        debugSandbox("unsandboxed-preflight", {
+          command: params.command,
+          cwd: localCwd,
+        });
+        return localBash.execute(id, params, signal, onUpdate, ctx);
       }
 
       const runBash = () => {
@@ -396,6 +444,13 @@ export default function (pi: ExtensionAPI) {
         .filter((content: any) => content.type === "text")
         .map((content: any) => content.text)
         .join("\n");
+      if (sandboxEnabled && !sandboxError && ctx?.hasUI && isPermissionError(output)) {
+        debugSandbox("sandbox-permission-error", {
+          command: params.command,
+          cwd: localCwd,
+          output: output.slice(0, 1000),
+        });
+      }
       if (
         sandboxEnabled &&
         !sandboxError &&
@@ -421,6 +476,10 @@ export default function (pi: ExtensionAPI) {
           truncated: false,
         },
       };
+    }
+
+    if (commandIsAllowedOutsideSandbox(event.command)) {
+      return { operations: localBashOperations };
     }
 
     const resolved = policyOrError();

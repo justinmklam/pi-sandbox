@@ -62,7 +62,10 @@ test("matches explicit wildcard directory approvals for sibling worktrees", () =
       commands: {
         global: [],
         directories: {
-          [`${project}*`]: { exact: ["make test"] },
+          [`${project}*`]: {
+            exact: ["make test"],
+            unsafePrefixes: ["poetry run tests/"],
+          },
         },
       },
     }),
@@ -72,6 +75,14 @@ test("matches explicit wildcard directory approvals for sibling worktrees", () =
     assert.equal(hasUnsandboxedCommand("make test", project, policy), true);
     assert.equal(hasUnsandboxedCommand("make test", join(worktree, "src"), policy), true);
     assert.equal(hasUnsandboxedCommand("make test", unrelated, policy), false);
+    assert.equal(
+      hasUnsandboxedCommand("poetry run tests/unit && rm -rf /", join(worktree, "src"), policy),
+      true,
+    );
+    assert.equal(
+      hasUnsandboxedCommand("poetry run tests/unit && rm -rf /", unrelated, policy),
+      false,
+    );
   } finally {
     rmSync(parent, { recursive: true, force: true });
   }
@@ -102,31 +113,73 @@ test("matches safe command prefixes but rejects shell composition", () => {
     rmSync(root, { recursive: true, force: true });
   }
 });
+test("matches unsafe command prefixes through shell composition", () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-sandbox-command-policy-"));
+  const path = join(root, "sandbox.json");
+  writeFileSync(
+    path,
+    JSON.stringify({
+      commands: {
+        global: { unsafePrefixes: ["poetry run tests/"] },
+        directories: {},
+      },
+    }),
+  );
+  try {
+    const policy = loadUnsandboxedCommands(path);
+    assert.equal(hasUnsandboxedCommand("poetry run tests/", root, policy), true);
+    assert.equal(hasUnsandboxedCommand("poetry run tests/unit", root, policy), true);
+    assert.equal(hasUnsandboxedCommand("poetry run tests/unit && rm -rf /", root, policy), true);
+    assert.equal(hasUnsandboxedCommand("poetry run tests/unit | tee output", root, policy), true);
+    assert.equal(hasUnsandboxedCommand("poetry run tests/$(touch /tmp/pwned)", root, policy), true);
+    assert.equal(hasUnsandboxedCommand("poetry run tests/`touch /tmp/pwned`", root, policy), true);
+    assert.equal(hasUnsandboxedCommand("poetry run test/unit", root, policy), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("persists project and global approvals without dropping other config", () => {
   const root = mkdtempSync(join(tmpdir(), "pi-sandbox-command-policy-"));
   const path = join(root, "nested", "sandbox.json");
   mkdirSync(join(root, "nested"));
-  writeFileSync(path, JSON.stringify({ other: true }));
+  writeFileSync(
+    path,
+    JSON.stringify({
+      other: true,
+      commands: { global: { unsafePrefixes: ["poetry run tests/"] } },
+    }),
+  );
   const policy = loadUnsandboxedCommands(path);
   try {
     addUnsandboxedCommand("npm run generate", "project", root, policy, path);
     addUnsandboxedCommand("echo global", "global", root, policy, path);
     assert.equal(hasUnsandboxedCommand("npm run generate", join(root, "src"), policy), true);
     assert.equal(hasUnsandboxedCommand("echo global", "/elsewhere", policy), true);
+    assert.equal(
+      hasUnsandboxedCommand("poetry run tests/unit && rm -rf /", "/elsewhere", policy),
+      true,
+    );
     addUnsandboxedPrefix("poetry run pytest", "project", root, policy, path);
     assert.equal(hasUnsandboxedCommand("poetry run pytest tests/", root, policy), true);
     assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), {
       other: true,
       commands: {
-        global: { exact: ["echo global"], prefixes: [] },
+        global: { exact: ["echo global"], prefixes: [], unsafePrefixes: ["poetry run tests/"] },
         directories: {
           [realpathSync.native(root)]: {
             exact: ["npm run generate"],
             prefixes: ["poetry run pytest"],
+            unsafePrefixes: [],
           },
         },
       },
     });
+    const reloaded = loadUnsandboxedCommands(path);
+    assert.equal(
+      hasUnsandboxedCommand("poetry run tests/unit | tee output", "/elsewhere", reloaded),
+      true,
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

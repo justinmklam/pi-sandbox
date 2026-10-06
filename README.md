@@ -59,12 +59,14 @@ sandbox are stored in `~/.pi/agent/sandbox.json` using this shape:
   "commands": {
     "global": {
       "exact": ["docker system prune"],
-      "prefixes": ["poetry run pytest"]
+      "prefixes": ["poetry run pytest"],
+      "unsafePrefixes": ["poetry run tests/"]
     },
     "directories": {
       "/path/to/project": {
         "exact": ["make build"],
-        "prefixes": ["poetry run pytest"]
+        "prefixes": ["poetry run pytest"],
+        "unsafePrefixes": ["poetry run tests/"]
       }
     }
   }
@@ -92,10 +94,19 @@ This matches `/path/to/project`, `/path/to/project.branch`, and directories
 below those paths. Wildcards are opt-in; keep the prefix narrow because the rule
 can approve commands in multiple sibling directories.
 
-Approvals can contain `exact` commands or safe `prefixes`. A prefix matches the
-whole command or the prefix followed by a space, so `poetry run pytest` matches
-additional pytest arguments but not `poetry run pytests`. Prefix matches reject
-shell composition such as pipes, redirects, command chaining, and substitutions.
+Approvals can contain `exact` commands, safe `prefixes`, or explicitly unsafe
+`unsafePrefixes`. A safe prefix matches the whole command or the prefix followed by a
+space, so `poetry run pytest` matches additional pytest arguments but not `poetry run
+pytests`. Safe prefix matches reject shell composition such as pipes, redirects, command
+chaining, and substitutions.
+
+An `unsafePrefixes` entry is a deliberate bypass: it matches any command beginning with
+the configured string, including commands containing pipes, redirects, substitutions, or
+chaining. For example, `poetry run tests/` also matches `poetry run tests/unit && rm -rf
+/`. Keep unsafe prefixes narrow, such as including a trailing space or path delimiter,
+and only add them manually to `sandbox.json`; interactive approval prompts do not create
+unsafe prefixes.
+
 The older array form is still read as a list of exact commands.
 
 `--no-sandbox` is the only way to run bash unsandboxed for a session.
