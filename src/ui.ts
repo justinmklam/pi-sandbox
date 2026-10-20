@@ -1,5 +1,12 @@
 import { type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Input, Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import {
+  Input,
+  Key,
+  matchesKey,
+  truncateToWidth,
+  visibleWidth,
+  wrapTextWithAnsi,
+} from "@earendil-works/pi-tui";
 
 import { type SessionAllowances } from "./nono.ts";
 import { domainIsAllowed, matchesPattern, ruleBreadthError } from "./policy.ts";
@@ -207,7 +214,7 @@ async function showPermissionPromptUnlocked(
         updateFocus();
       },
       render(width: number): string[] {
-        const lines = [truncateToWidth(theme.fg("warning", title), width)];
+        const lines = wrapTextWithAnsi(theme.fg("warning", title), width);
         if (remainingSeconds !== undefined) {
           lines.push(
             truncateToWidth(

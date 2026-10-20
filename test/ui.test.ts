@@ -132,6 +132,61 @@ test(
   },
 );
 test(
+  "showPermissionPrompt shows the full command when the title wraps",
+  { timeout: 1_000 },
+  async () => {
+    type TestComponent = {
+      render(width: number): string[];
+      handleInput(data: string): void;
+      dispose?(): void;
+    };
+    type PromptFactory<T> = (
+      tui: { requestRender(): void },
+      theme: { fg(color: string, text: string): string },
+      keybindings: object,
+      done: (result: T) => void,
+    ) => TestComponent;
+
+    const command = "git commit -m 'fix prompt display for long sandbox command'";
+    let renderedLines: string[] = [];
+    const pi = {
+      events: { emit: () => undefined },
+    } as unknown as ExtensionAPI;
+    const ctx = {
+      cwd: "/workspace",
+      hasUI: true,
+      ui: {
+        custom: <T>(factory: PromptFactory<T>): Promise<T> =>
+          new Promise<T>((resolve) => {
+            const component = factory(
+              { requestRender: () => undefined },
+              { fg: (_color, text) => text },
+              {},
+              resolve,
+            );
+            renderedLines = component.render(32);
+            component.handleInput("\u001b");
+            component.dispose?.();
+          }),
+      },
+    } as unknown as ExtensionContext;
+
+    const result = await showPermissionPrompt(
+      pi,
+      ctx,
+      `Sandbox blocked this command. Run it outside the sandbox?\n${command}`,
+      command,
+      () => null,
+      0,
+    );
+
+    const renderedText = renderedLines.join(" ").replace(/\s+/g, " ");
+    assert.ok(renderedText.includes(command.replace(/\s+/g, " ")));
+    assert.deepEqual(result, { action: "abort", value: command });
+  },
+);
+
+test(
   "showPermissionPrompt safely aborts when its timeout expires",
   { timeout: 1_000 },
   async () => {

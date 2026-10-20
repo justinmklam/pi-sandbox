@@ -97,6 +97,7 @@ test("buildNonoArgv dedupes session grants and keeps profile flags before the co
     "/bin/bash",
     ["-c"],
     "echo hi",
+    "darwin",
   );
 
   assert.deepEqual(argv, [
@@ -105,6 +106,8 @@ test("buildNonoArgv dedupes session grants and keeps profile flags before the co
     "-p",
     "/profiles/pi.json",
     "--trust-proxy-ca",
+    "--proxy-ca-validity",
+    "30",
     "--allow-cwd",
     "--allow",
     "/write",
@@ -114,6 +117,29 @@ test("buildNonoArgv dedupes session grants and keeps profile flags before the co
     "a.example.com",
     "--allow-domain",
     "b.example.com",
+    "--",
+    "/bin/bash",
+    "-c",
+    "echo hi",
+  ]);
+});
+
+test("buildNonoArgv omits proxy CA flags on Linux", () => {
+  const argv = buildNonoArgv(
+    "/profiles/pi.json",
+    { domains: [], readPaths: [], writePaths: [] },
+    "/bin/bash",
+    ["-c"],
+    "echo hi",
+    "linux",
+  );
+
+  assert.deepEqual(argv, [
+    "run",
+    "-s",
+    "-p",
+    "/profiles/pi.json",
+    "--allow-cwd",
     "--",
     "/bin/bash",
     "-c",
@@ -135,6 +161,7 @@ test("buildNonoArgv uses single-file flags for existing files", () => {
       "/bin/bash",
       ["-c"],
       "echo hi",
+      "darwin",
     );
 
     assert.deepEqual(argv, [
@@ -143,6 +170,8 @@ test("buildNonoArgv uses single-file flags for existing files", () => {
       "-p",
       "/profiles/pi.json",
       "--trust-proxy-ca",
+      "--proxy-ca-validity",
+      "30",
       "--allow-cwd",
       "--allow-file",
       file,

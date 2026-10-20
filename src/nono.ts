@@ -51,10 +51,15 @@ export function buildNonoArgv(
   shell: string,
   shellArgs: string[],
   command: string,
+  platform: NodeJS.Platform = process.platform,
 ): string[] {
   const writePaths = unique(session.writePaths);
   const readPaths = unique(session.readPaths).filter((path) => !writePaths.includes(path));
-  const argv = ["run", "-s", "-p", profilePath, "--trust-proxy-ca", "--allow-cwd"];
+  const argv = ["run", "-s", "-p", profilePath];
+  if (platform === "darwin") {
+    argv.push("--trust-proxy-ca", "--proxy-ca-validity", "30");
+  }
+  argv.push("--allow-cwd");
 
   for (const path of writePaths) argv.push(grantFlag(path, true), path);
   for (const path of readPaths) argv.push(grantFlag(path, false), path);

@@ -167,10 +167,10 @@ own policy sets `PI_SANDBOX_NONO_PROFILE`.
 ### Credential proxy TLS trust
 
 When a profile uses nono credential injection, nono may route the command through a
-local TLS-intercepting proxy. `pi-sandbox` passes `--trust-proxy-ca` on every
-sandboxed Bash invocation so clients such as `pup` can validate certificates
-issued by that proxy. The flag is harmless when no credential or other
-TLS-intercepting route is active.
+local TLS-intercepting proxy. On macOS, `pi-sandbox` passes `--trust-proxy-ca`
+with `--proxy-ca-validity 30` so clients such as `pup` can validate certificates
+issued by that proxy; the trusted CA is renewed every 30 days. Neither flag is
+passed on Linux, where nono does not add the proxy CA to the system trust store.
 
 This matters for requests such as:
 
@@ -178,6 +178,7 @@ This matters for requests such as:
 nono run \
   --profile ~/.config/nono/profiles/base.json \
   --trust-proxy-ca \
+  --proxy-ca-validity 30 \
   -- pup dashboards get 4er-sx3-tes --output json
 ```
 
@@ -214,8 +215,9 @@ permission error.
 | `--trust-proxy-ca` | Adds the proxy CA to the user trust store through Keychain. The first use may prompt for biometric/password approval; later runs reuse the CA until it expires. | No-op in nono; it does not add the proxy CA to a Linux system trust store. Configure the client’s CA bundle according to the nono credential-proxy documentation if it does not already trust the proxy CA. |
 | `filesystem.deny` overlap | No documented Linux-style startup restriction | nono refuses a profile when a deny path is inside an allowed/read/write parent |
 
-The platform differences do not change pi-sandbox’s command construction: Bash
-still receives the same `nono run` flags on both platforms. Windows is not supported.
+The platform differences do not change pi-sandbox's command construction: Bash
+still receives the same base sandbox flags on both platforms. Proxy CA trust and
+validity flags are macOS-only. Windows is not supported.
 
 ## Usage
 
@@ -232,9 +234,10 @@ Alt+S                                      toggle sandboxing on/off for the sess
 
 ## What it does
 
-**Bash commands** are wrapped with `nono run -p <profile> --trust-proxy-ca`, which
-enforces network and filesystem restrictions with Landlock (Linux) or Seatbelt
-(macOS). Commands entered with `!` are sandboxed too.
+**Bash commands** are wrapped with `nono run -p <profile>`; on macOS they also
+receive `--trust-proxy-ca --proxy-ca-validity 30`. This enforces network and
+filesystem restrictions with Landlock (Linux) or Seatbelt (macOS). Commands
+entered with `!` are sandboxed too.
 
 **Read, write, and edit tool calls** are intercepted before execution and checked
 against the *resolved* profile (`nono profile show --json`), so grants inherited
