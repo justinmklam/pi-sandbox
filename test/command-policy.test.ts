@@ -139,6 +139,44 @@ test("matches unsafe command prefixes through shell composition", () => {
   }
 });
 
+test("matches unsafe substrings anywhere in commands", () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-sandbox-command-policy-"));
+  const outside = mkdtempSync(join(tmpdir(), "pi-sandbox-command-policy-outside-"));
+  const path = join(root, "sandbox.json");
+  writeFileSync(
+    path,
+    JSON.stringify({
+      commands: {
+        global: { unsafeContains: ["poetry run pytest"] },
+        directories: { [root]: { unsafeContains: ["make test"] } },
+      },
+    }),
+  );
+  try {
+    const policy = loadUnsandboxedCommands(path);
+    assert.equal(
+      hasUnsandboxedCommand("cd project && poetry run pytest tests/ | tee output", outside, policy),
+      true,
+    );
+    assert.equal(hasUnsandboxedCommand("echo before && make test now", root, policy), true);
+    assert.equal(hasUnsandboxedCommand("poetry run py-test", outside, policy), false);
+    assert.equal(hasUnsandboxedCommand("echo before && make test now", outside, policy), false);
+
+    addUnsandboxedCommand("echo approved", "global", root, policy, path);
+    const saved = JSON.parse(readFileSync(path, "utf8"));
+    assert.deepEqual(saved.commands.global.unsafeContains, ["poetry run pytest"]);
+    assert.deepEqual(saved.commands.directories[realpathSync.native(root)].unsafeContains, [
+      "make test",
+    ]);
+    const reloaded = loadUnsandboxedCommands(path);
+    assert.equal(hasUnsandboxedCommand("make test through wrapper", root, reloaded), true);
+    assert.equal(hasUnsandboxedCommand("poetry run pytest in wrapper", outside, reloaded), true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
+
 test("persists project and global approvals without dropping other config", () => {
   const root = mkdtempSync(join(tmpdir(), "pi-sandbox-command-policy-"));
   const path = join(root, "nested", "sandbox.json");
@@ -165,12 +203,18 @@ test("persists project and global approvals without dropping other config", () =
     assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), {
       other: true,
       commands: {
-        global: { exact: ["echo global"], prefixes: [], unsafePrefixes: ["poetry run tests/"] },
+        global: {
+          exact: ["echo global"],
+          prefixes: [],
+          unsafePrefixes: ["poetry run tests/"],
+          unsafeContains: [],
+        },
         directories: {
           [realpathSync.native(root)]: {
             exact: ["npm run generate"],
             prefixes: ["poetry run pytest"],
             unsafePrefixes: [],
+            unsafeContains: [],
           },
         },
       },

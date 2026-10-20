@@ -8,6 +8,7 @@ interface CommandRulesConfig {
   exact?: string[];
   prefixes?: string[];
   unsafePrefixes?: string[];
+  unsafeContains?: string[];
 }
 
 export interface SandboxCommandConfig {
@@ -24,6 +25,7 @@ export interface CommandRules {
   exact: Set<string>;
   prefixes: Set<string>;
   unsafePrefixes: Set<string>;
+  unsafeContains: Set<string>;
 }
 
 export interface UnsandboxedCommandPolicy {
@@ -36,7 +38,12 @@ export function sandboxConfigPath(): string {
 }
 
 function emptyRules(): CommandRules {
-  return { exact: new Set(), prefixes: new Set(), unsafePrefixes: new Set() };
+  return {
+    exact: new Set(),
+    prefixes: new Set(),
+    unsafePrefixes: new Set(),
+    unsafeContains: new Set(),
+  };
 }
 
 function validCommands(value: unknown): string[] {
@@ -52,7 +59,12 @@ function validCommands(value: unknown): string[] {
 
 function parseRules(value: unknown): CommandRules {
   if (Array.isArray(value)) {
-    return { exact: new Set(validCommands(value)), prefixes: new Set(), unsafePrefixes: new Set() };
+    return {
+      exact: new Set(validCommands(value)),
+      prefixes: new Set(),
+      unsafePrefixes: new Set(),
+      unsafeContains: new Set(),
+    };
   }
   if (typeof value !== "object" || value === null) return emptyRules();
   const config = value as CommandRulesConfig;
@@ -60,6 +72,7 @@ function parseRules(value: unknown): CommandRules {
     exact: new Set(validCommands(config.exact)),
     prefixes: new Set(validCommands(config.prefixes)),
     unsafePrefixes: new Set(validCommands(config.unsafePrefixes)),
+    unsafeContains: new Set(validCommands(config.unsafeContains)),
   };
 }
 
@@ -92,6 +105,7 @@ function commandHasUnsafeShellSyntax(command: string): boolean {
 function rulesMatch(command: string, rules: CommandRules): boolean {
   if (rules.exact.has(command)) return true;
   if ([...rules.unsafePrefixes].some((prefix) => command.startsWith(prefix))) return true;
+  if ([...rules.unsafeContains].some((text) => command.includes(text))) return true;
   if (commandHasUnsafeShellSyntax(command)) return false;
   return [...rules.prefixes].some(
     (prefix) => command === prefix || command.startsWith(`${prefix} `),
@@ -177,6 +191,7 @@ function writeCommandPolicy(policy: UnsandboxedCommandPolicy, path: string): voi
     exact: [...rules.exact],
     prefixes: [...rules.prefixes],
     unsafePrefixes: [...rules.unsafePrefixes],
+    unsafeContains: [...rules.unsafeContains],
   });
   const directories: Record<string, CommandRulesConfig> = {};
   for (const [directory, rules] of policy.directories) {

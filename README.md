@@ -60,13 +60,15 @@ sandbox are stored in `~/.pi/agent/sandbox.json` using this shape:
     "global": {
       "exact": ["docker system prune"],
       "prefixes": ["poetry run pytest"],
-      "unsafePrefixes": ["poetry run tests/"]
+      "unsafePrefixes": ["poetry run tests/"],
+      "unsafeContains": ["poetry run pytest"]
     },
     "directories": {
       "/path/to/project": {
         "exact": ["make build"],
         "prefixes": ["poetry run pytest"],
-        "unsafePrefixes": ["poetry run tests/"]
+        "unsafePrefixes": ["poetry run tests/"],
+        "unsafeContains": ["make test"]
       }
     }
   }
@@ -106,6 +108,12 @@ chaining. For example, `poetry run tests/` also matches `poetry run tests/unit &
 /`. Keep unsafe prefixes narrow, such as including a trailing space or path delimiter,
 and only add them manually to `sandbox.json`; interactive approval prompts do not create
 unsafe prefixes.
+
+An `unsafeContains` entry is also a deliberate bypass: it matches when the configured
+literal text appears anywhere in the command, including when the command is chained,
+piped, redirected, or otherwise composed. For example, `make test` matches both `make
+test` and `cd project && make test`. Keep these strings narrow and only add them manually
+to `sandbox.json`; interactive approval prompts do not create unsafe substring rules.
 
 The older array form is still read as a list of exact commands.
 
