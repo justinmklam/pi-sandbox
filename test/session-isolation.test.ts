@@ -1,4 +1,8 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type {
+  ExtensionAPI,
+  ExtensionContext,
+  ExtensionToolContext,
+} from "@earendil-works/pi-coding-agent";
 
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -25,6 +29,9 @@ function session(cwd: string) {
     registerCommand: () => {},
     getFlag: () => false,
   } as unknown as ExtensionAPI;
+  // pi 1.x passes an `ExtensionToolContext` (an `ExtensionContext` plus `tools` and
+  // `executeTool`) to a tool's `execute`. This backend never reads those two, so the
+  // fake only models the `ExtensionContext` half that the extension actually uses.
   const ctx = {
     cwd,
     hasUI: false,
@@ -35,7 +42,7 @@ function session(cwd: string) {
       setStatus: () => {},
       theme: { fg: (_color: string, text: string) => text },
     },
-  } as unknown as ExtensionContext;
+  } as unknown as ExtensionToolContext;
   extension(api);
   return {
     async start() {

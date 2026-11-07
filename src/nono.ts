@@ -37,6 +37,14 @@ function grantFlag(path: string, write: boolean): string {
 /**
  * Build the `nono run` argv for one command.
  *
+ * `--trust-proxy-ca` is macOS-only upstream: nono's Linux build does not define the flag
+ * at all, so passing it there makes the argument parser reject the entire argv
+ * ("unexpected argument '--trust-proxy-ca' found") before the sandbox starts. It is
+ * appended on macOS only, where it adds the credential proxy's interception CA to the
+ * Keychain so clients that read the system trust store (`gh`, `terraform`) accept it,
+ * with `--proxy-ca-validity 30` so the trusted CA is renewed every 30 days. On Linux the
+ * CA must come from the client's own bundle, so both flags are omitted.
+ *
  * `--allow-cwd` is the switch that lets the profile's `workdir.access` apply to the
  * command's working directory; nono refuses to run non-interactively without it
  * ("CWD access requires --allow-cwd in non-interactive mode"). The flag grants

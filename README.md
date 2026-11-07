@@ -184,7 +184,8 @@ nono run \
 
 If Bash is already running inside a nono session, restart the outer session with
 `--trust-proxy-ca`; adding the flag to a command nested inside that session is too
-late to change the outer process's certificate trust.
+late to change the outer process's certificate trust. The flag is macOS-only, so on Linux
+skip it: nono's Linux build rejects it as an unknown argument.
 
 For a custom Datadog credential route, the injected header must use the scheme
 expected by Datadog:
@@ -212,7 +213,7 @@ permission error.
 |------|-------|-------|
 | Filesystem sandbox | Seatbelt | Landlock (Linux kernel 5.13+) |
 | Credential store | macOS Keychain | Linux Secret Service, such as `gnome-keyring` |
-| `--trust-proxy-ca` | Adds the proxy CA to the user trust store through Keychain. The first use may prompt for biometric/password approval; later runs reuse the CA until it expires. | No-op in nono; it does not add the proxy CA to a Linux system trust store. Configure the client’s CA bundle according to the nono credential-proxy documentation if it does not already trust the proxy CA. |
+| `--trust-proxy-ca` | Adds the proxy CA to the user trust store through Keychain. The first use may prompt for biometric/password approval; later runs reuse the CA until it expires. | Unavailable: nono's Linux build does not define the flag, so passing it fails argument parsing ("unexpected argument '--trust-proxy-ca' found") before the sandbox starts. `pi-sandbox` omits it on Linux; trust the proxy CA through the client's own CA bundle, since Linux has no equivalent system trust-store step. |
 | `filesystem.deny` overlap | No documented Linux-style startup restriction | nono refuses a profile when a deny path is inside an allowed/read/write parent |
 
 The platform differences do not change pi-sandbox's command construction: Bash
