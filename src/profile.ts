@@ -29,6 +29,7 @@ export interface NonoProfile {
     credentials?: string[];
     open_port?: number[];
     listen_port?: number[];
+    connect_port?: number[];
   };
   [k: string]: unknown;
 }
@@ -164,29 +165,113 @@ function writeProfileFile(path: string, profile: NonoProfile): void {
   writeFileSync(path, JSON.stringify(profile, null, 2) + "\n", "utf-8");
 }
 
-function mutateProfile(path: string, mutate: (profile: NonoProfile) => void): void {
+/** Verify a freshly written profile resolves the way the runtime will resolve it. */
+export type ProfileValidator = (profilePath: string) => { ok: boolean; detail: string };
+
+export type ProfileWriteResult = { ok: true } | { ok: false; detail: string; restored: boolean };
+
+/**
+ * Write a profile only if the result still resolves, otherwise put the file back.
+ *
+ * The original bytes are captured before the write and restored verbatim — not a
+ * re-serialization of the parsed profile — so a rejection leaves the hand-authored
+ * file exactly as the user wrote it (indentation, key order, trailing newline).
+ *
+ * An unreadable or malformed profile throws before anything is written, matching
+ * `requireProfile`'s messages.
+ */
+export function writeProfileChecked(
+  path: string,
+  mutate: (profile: NonoProfile) => void,
+  validate: ProfileValidator,
+): ProfileWriteResult {
+  const profile = requireProfile(path);
+  const original = readFileSync(path);
+
+  mutate(profile);
+  writeProfileFile(path, profile);
+
+  const result = validate(path);
+  if (result.ok) return { ok: true };
+
+  try {
+    writeFileSync(path, original);
+  } catch {
+    return { ok: false, detail: result.detail, restored: false };
+  }
+  return { ok: false, detail: result.detail, restored: true };
+}
+
+function mutateProfile(
+  path: string,
+  mutate: (profile: NonoProfile) => void,
+  validate?: ProfileValidator,
+): ProfileWriteResult {
+  if (validate) return writeProfileChecked(path, mutate, validate);
+
   const profile = requireProfile(path);
   mutate(profile);
   writeProfileFile(path, profile);
+  return { ok: true };
 }
 
-export function addAllowPathToProfile(path: string, entry: string): void {
-  mutateProfile(path, (profile) => {
-    const filesystem = (profile.filesystem ??= {});
-    filesystem.allow = unique([...stringArray(filesystem.allow), entry]);
-  });
+export function addAllowPathToProfile(
+  path: string,
+  entry: string,
+  validate?: ProfileValidator,
+): ProfileWriteResult {
+  return mutateProfile(
+    path,
+    (profile) => {
+      const filesystem = (profile.filesystem ??= {});
+      filesystem.allow = unique([...stringArray(filesystem.allow), entry]);
+    },
+    validate,
+  );
 }
 
-export function addReadPathToProfile(path: string, entry: string): void {
-  mutateProfile(path, (profile) => {
-    const filesystem = (profile.filesystem ??= {});
-    filesystem.read = unique([...stringArray(filesystem.read), entry]);
-  });
+export function addReadPathToProfile(
+  path: string,
+  entry: string,
+  validate?: ProfileValidator,
+): ProfileWriteResult {
+  return mutateProfile(
+    path,
+    (profile) => {
+      const filesystem = (profile.filesystem ??= {});
+      filesystem.read = unique([...stringArray(filesystem.read), entry]);
+    },
+    validate,
+  );
 }
 
-export function addDomainToProfile(path: string, domain: string): void {
-  mutateProfile(path, (profile) => {
-    const network = (profile.network ??= {});
-    network.allow_domain = unique([...stringArray(network.allow_domain), domain]);
-  });
+/** `filesystem.write` is write-only, so a write grant never widens read access. */
+export function addWritePathToProfile(
+  path: string,
+  entry: string,
+  validate?: ProfileValidator,
+): ProfileWriteResult {
+  return mutateProfile(
+    path,
+    (profile) => {
+      const filesystem = (profile.filesystem ??= {});
+      filesystem.write = unique([...stringArray(filesystem.write), entry]);
+    },
+    validate,
+  );
+}
+
+export function addDomainToProfile(
+  path: string,
+  domain: string,
+  validate?: ProfileValidator,
+): ProfileWriteResult {
+  return mutateProfile(
+    path,
+    (profile) => {
+      const network = (profile.network ??= {});
+      network.allow_domain = unique([...stringArray(network.allow_domain), domain]);
+    },
+    validate,
+  );
 }

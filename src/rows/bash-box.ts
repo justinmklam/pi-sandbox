@@ -52,6 +52,8 @@ export type BashBoxInput = {
   running?: boolean;
   /** Elapsed milliseconds, or undefined while the call is too young to report a duration. */
   elapsedMs?: number;
+  /** One-line denial hint drawn between the output and the footer. */
+  hint?: string;
 };
 
 export function renderBashBox(
@@ -75,6 +77,7 @@ export function renderBashBox(
   }
   if (input.isError) body.push(theme.fg("error", "✘ Error"));
   for (const line of shown) body.push(theme.fg("toolOutput", line));
+  if (input.hint) body.push(theme.fg("warning", input.hint));
 
   const prompt = theme.fg("toolTitle", theme.bold("$"));
   const promptWidth = measure.width(prompt) + 1;

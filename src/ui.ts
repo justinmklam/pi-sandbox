@@ -8,31 +8,80 @@ import {
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 
-import { type SessionAllowances } from "./nono.ts";
+import type { SandboxFix } from "./denials.ts";
+
 import { domainIsAllowed, matchesPattern, ruleBreadthError } from "./policy.ts";
-import { type ProfilePolicy, resolveProfilePath } from "./profile.ts";
+import { resolveProfilePath } from "./profile.ts";
+import { wrapPlain } from "./rows/format.ts";
 
 export const DEFAULT_PERMISSION_PROMPT_TIMEOUT_SECONDS = 30;
 
-export type PermissionChoice = "abort" | "once" | "session" | "project" | "global";
+export type PermissionChoice = "abort" | "once" | "session" | "project" | "global" | "deny";
 
 export type PermissionPromptResult = {
   action: PermissionChoice;
   value: string;
+  /** Present only when the auto-abort deadline ended the prompt, not a keypress. */
+  reason?: "timeout";
 };
 
-type ProfilePermissionPromptResult = {
-  action: Exclude<PermissionChoice, "once">;
-  value: string;
-};
+/** Actions that grant something; only these can be edited or persisted. */
+export const GRANT_ACTIONS: PermissionChoice[] = ["once", "session", "project", "global"];
 
-interface PromptOption {
+/** The grants a profile write can persist. `global` has no separate destination. */
+export type PersistedGrant = Exclude<PermissionChoice, "abort" | "deny" | "global">;
+
+export function isGrantAction(action: PermissionChoice): boolean {
+  return GRANT_ACTIONS.includes(action);
+}
+
+export function asPersistedGrant(action: PermissionChoice): PersistedGrant | null {
+  return action === "once" || action === "session" || action === "project" ? action : null;
+}
+
+export interface PromptOption {
   label: string;
   key: string;
   action: PermissionChoice;
   confirm?: boolean;
   hint?: string;
 }
+
+export type PromptRule = {
+  /** "rule to add" | "no rule can grant this" */
+  label: string;
+  /** Static lines rendered with the `│` gutter. */
+  lines: string[];
+  /** The fixed part of an editable rule (`filesystem.write += `); the input follows it. */
+  prefix?: string;
+  /** Where the rule lands: the nono profile, or sandbox.json plus its scope. */
+  destination?: string;
+  editable: boolean;
+};
+
+export type PermissionPromptSpec = {
+  /** `warn` for a policy that can be granted, `block` for a hard deny. */
+  severity: "warn" | "block";
+  title: string;
+  subjectLabel: string;
+  /** The denied subject; may contain newlines (a command). */
+  subject: string;
+  rule?: PromptRule;
+  note?: string;
+};
+
+export type PromptLinesView = {
+  width: number;
+  rows: number;
+  theme: { fg(color: string, text: string): string };
+  selectedIndex: number;
+  pendingAction: PermissionChoice | null;
+  editing: boolean;
+  input?: (width: number) => string;
+  error: string | null;
+  remainingSeconds: number | undefined;
+  options: PromptOption[];
+};
 
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
 let permissionPromptQueue: Promise<void> = Promise.resolve();
@@ -49,6 +98,15 @@ async function serializePermissionPrompt<T>(prompt: () => Promise<T>): Promise<T
   } finally {
     release();
   }
+}
+
+export function resolvePromptTimeoutSeconds(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.PI_SANDBOX_PROMPT_TIMEOUT_SECONDS?.trim();
+  if (raw === undefined || raw.length === 0) return DEFAULT_PERMISSION_PROMPT_TIMEOUT_SECONDS;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) return DEFAULT_PERMISSION_PROMPT_TIMEOUT_SECONDS;
+  if (parsed === 0) return 0;
+  return parsed > 0 ? parsed : DEFAULT_PERMISSION_PROMPT_TIMEOUT_SECONDS;
 }
 
 export function permissionPromptTimeoutMs(timeoutSeconds: unknown): number | undefined {
@@ -68,52 +126,237 @@ export function permissionPromptRemainingSeconds(deadlineMs: number, nowMs = Dat
   return Math.max(0, Math.ceil((deadlineMs - nowMs) / 1000));
 }
 
-export function unsandboxedCommandOptions(): PromptOption[] {
+export function unsandboxedCommandOptions({
+  argvRules = true,
+}: { argvRules?: boolean } = {}): PromptOption[] {
   return [
-    { label: "Allow this command once outside the sandbox", key: "o", action: "once" },
-    { label: "Always allow outside the sandbox this session", key: "s", action: "session" },
-    {
-      label: "Always allow outside the sandbox in this project",
-      key: "P",
-      action: "project",
-      confirm: true,
-    },
-    {
-      label: "Always allow outside the sandbox globally",
-      key: "A",
-      action: "global",
-      confirm: true,
-    },
+    // The persist options only appear when a command can be matched by argv; a command the
+    // splitter rejects (substitution, redirection) keeps the exact, memory-only choices.
+    ...(argvRules
+      ? [
+          {
+            label: "Allow matching commands in this project",
+            key: "p",
+            action: "project" as const,
+            confirm: true,
+          },
+          {
+            label: "Allow matching commands in all projects",
+            key: "a",
+            action: "global" as const,
+            confirm: true,
+          },
+        ]
+      : []),
+    { label: "Allow this exact command once", key: "o", action: "once" },
+    { label: "Allow this exact command this session", key: "s", action: "session" },
     { label: "Abort (keep sandboxed and blocked)", key: "esc", action: "abort" },
   ];
 }
 
-export function permissionOptions(): PromptOption[] {
+export function permissionOptions({ once = true }: { once?: boolean } = {}): PromptOption[] {
   const profilePath = resolveProfilePath();
   return [
-    { label: "Allow for this session only", key: "s", action: "session" },
-    { label: "Abort (keep blocked)", key: "esc", action: "abort" },
+    ...(once ? [{ label: "Allow once", key: "o", action: "once" as const }] : []),
+    { label: "Allow for this session", key: "s", action: "session" },
     {
-      label: "Allow this project (saved to the nono profile)",
-      key: "P",
+      label: "Save this rule to the profile",
+      key: "p",
       action: "project",
       confirm: true,
       hint: `→ ${profilePath}`,
     },
-    {
-      label: "Allow all projects (saved to the nono profile)",
-      key: "A",
-      action: "global",
-      confirm: true,
-      hint: `→ ${profilePath}`,
-    },
+    { label: "Deny for this session", key: "d", action: "deny" },
+    { label: "Abort (keep blocked)", key: "esc", action: "abort" },
   ];
+}
+
+/**
+ * The safe default: Abort is preselected so a stray Enter never grants access. Falls back to
+ * the last option when a custom option set omits it.
+ */
+export function initialSelectedIndex(options: PromptOption[]): number {
+  const abortIndex = options.findIndex((option) => option.action === "abort");
+  return abortIndex === -1 ? Math.max(0, options.length - 1) : abortIndex;
+}
+
+/**
+ * Four scan levels: the reason, the denied subject, the rule that would fix it and where
+ * it lands, then the decision. Every line is truncated to `width` last, and the block is
+ * spent against `rows - 1` in a fixed order that never removes the option lines.
+ */
+export function promptLines(spec: PermissionPromptSpec, view: PromptLinesView): string[] {
+  const { width, rows, theme } = view;
+  const gutter = "  │ ";
+  const indent = "  ";
+  const fit = (line: string): string => truncateToWidth(line, width);
+
+  const titleLines = wrapTextWithAnsi(
+    theme.fg(
+      spec.severity === "warn" ? "warning" : "error",
+      `${spec.severity === "warn" ? "⚠️" : "⛔"}  ${spec.title}`,
+    ),
+    width,
+  );
+
+  const wrapSubject = (limit: number): string[] => {
+    const pieces: string[] = [];
+    for (const logical of spec.subject.split("\n")) {
+      const commandPrefix = spec.subjectLabel === "command";
+      const wrapped = wrapPlain(
+        logical.length > 0 ? logical : " ",
+        Math.max(1, width - 4 - (commandPrefix ? 2 : 0)),
+      );
+      for (const piece of wrapped) {
+        const prefix = commandPrefix ? (pieces.length === 0 ? "$ " : "  ") : "";
+        pieces.push(prefix + piece);
+      }
+    }
+    if (pieces.length > limit) {
+      return [...pieces.slice(0, limit), `… ${pieces.length - limit} more lines`];
+    }
+    return pieces;
+  };
+
+  const ruleBlock = (collapsed: boolean): string[] => {
+    const rule = spec.rule;
+    if (!rule) return [];
+    const editingMarker =
+      view.editing && rule.editable ? "  (editing — enter to confirm, esc to reset)" : "";
+    const out = [theme.fg("dim", `${indent}${rule.label}${editingMarker}`)];
+    if (view.editing && rule.editable && view.input) {
+      const prefix = rule.prefix ?? "";
+      const inputWidth = Math.max(1, width - 4 - visibleWidth(prefix));
+      out.push(`${gutter}${theme.fg("accent", prefix)}${view.input(inputWidth)}`);
+    }
+    if (!collapsed) {
+      for (const line of rule.lines) out.push(`${gutter}${line}`);
+      if (rule.destination) out.push(`${gutter}writes to ${rule.destination}`);
+    }
+    if (view.error) out.push(`${gutter}${theme.fg("error", `✗ ${view.error}`)}`);
+    return out;
+  };
+
+  const noteText =
+    view.remainingSeconds !== undefined
+      ? theme.fg("warning", `⏳ Auto-abort in ${view.remainingSeconds}s (permission stays blocked)`)
+      : spec.note
+        ? theme.fg("dim", spec.note)
+        : undefined;
+
+  const optionLines = (withHints: boolean): string[] => {
+    const out: string[] = [];
+    for (let i = 0; i < view.options.length; i++) {
+      const option = view.options[i]!;
+      const prefix = i === view.selectedIndex ? " → " : "   ";
+      let line = `${prefix}${theme.fg("accent", `[${option.key}]`)} ${option.label}`;
+      if (withHints && option.hint) {
+        const hint = `  ${theme.fg("dim", option.hint)}`;
+        if (visibleWidth(line) + visibleWidth(hint) <= width) line += hint;
+      }
+      if (view.pendingAction === option.action) {
+        line += `  ${theme.fg("warning", "→ press Enter to confirm")}`;
+      }
+      out.push(line);
+    }
+    return out;
+  };
+
+  const footerText = view.editing
+    ? "↑↓ navigate, enter confirm, esc reset, ctrl+c cancel"
+    : view.pendingAction
+      ? `↑↓ navigate,${spec.rule?.editable ? " tab edit," : ""} enter confirm, esc/ctrl+c cancel`
+      : `↑↓ navigate,${spec.rule?.editable ? " tab edit," : ""} enter select, esc/ctrl+c cancel`;
+
+  // Level 0 is the full block. Each later level spends one more part of the budget:
+  // hints, note, subject (3 then 0 lines), rule, footer. Options are never dropped.
+  const assemble = (level: number): string[] => {
+    // Below level 3 the frame is still spacious; from there the blank lines go first so the
+    // decisions survive instead of the decoration.
+    const spaced = level < 3;
+    const lines: string[] = [...titleLines];
+    if (level < 4) {
+      if (spaced) lines.push("");
+      lines.push(theme.fg("dim", `${indent}${spec.subjectLabel}`));
+      for (const line of wrapSubject(level >= 3 ? 3 : 5)) lines.push(`${gutter}${line}`);
+      if (spaced) lines.push("");
+    }
+    const rule = ruleBlock(level >= 5);
+    if (rule.length > 0) {
+      lines.push(...rule);
+      if (spaced) lines.push("");
+    }
+    if (level < 2 && noteText) {
+      lines.push(`${indent}${noteText}`);
+      if (spaced) lines.push("");
+    }
+    lines.push(...optionLines(level < 1));
+    if (level < 6) {
+      if (spaced) lines.push("");
+      lines.push(theme.fg("dim", footerText));
+    }
+    return lines.map(fit);
+  };
+
+  const budget = Math.max(1, rows - 1);
+  for (let level = 0; level <= 6; level++) {
+    const lines = assemble(level);
+    if (lines.length <= budget) return lines;
+  }
+  // A terminal this short cannot show every decision: keep the selected one and the footer.
+  const selected = view.options[view.selectedIndex] ?? view.options[0];
+  const minimal: string[] = [];
+  if (selected) {
+    minimal.push(fit(` → ${theme.fg("accent", `[${selected.key}]`)} ${selected.label}`));
+  }
+  minimal.push(fit(theme.fg("dim", "enter select, esc/ctrl+c cancel")));
+  return minimal;
+}
+
+/** Build the rule block a denial's fix would add, or null when no rule can grant it. */
+export function promptRuleFor(
+  fix: SandboxFix,
+  opts: { profilePath: string; configPath: string; scope: "project" | "global" },
+): PromptRule | null {
+  if (fix === null) return null;
+  switch (fix.type) {
+    case "profile-path":
+      return {
+        label: "rule to add",
+        lines: [],
+        prefix: `${fix.field} += `,
+        destination: opts.profilePath,
+        editable: true,
+      };
+    case "profile-domain":
+      return {
+        label: "rule to add",
+        lines: [],
+        prefix: "network.allow_domain += ",
+        destination: opts.profilePath,
+        editable: true,
+      };
+    case "profile-port":
+      return {
+        label: "rule to add",
+        lines: [`network.connect_port += ${fix.port} (Linux only)`],
+        destination: opts.profilePath,
+        editable: false,
+      };
+    case "command-argv":
+      return {
+        label: "rule to add",
+        lines: fix.argv.map((argv) => argv.join(" ")),
+        destination: `${opts.configPath} · ${opts.scope}`,
+        editable: false,
+      };
+  }
 }
 
 async function showPermissionPromptUnlocked(
   pi: ExtensionAPI,
   ctx: ExtensionContext,
-  title: string,
+  spec: PermissionPromptSpec,
   originalValue: string,
   validateValue: (value: string) => string | null,
   timeoutSeconds?: number,
@@ -127,13 +370,14 @@ async function showPermissionPromptUnlocked(
   const options = customOptions ?? permissionOptions();
   const result = await ctx.ui.custom<PermissionPromptResult>((tui, theme, _kb, done) => {
     const input = new Input();
-    let selectedIndex = 0;
+    let selectedIndex = initialSelectedIndex(options);
     let pendingAction: PermissionChoice | null = null;
     let editing = false;
     let componentFocused = false;
     let error: string | null = null;
     let resolved = false;
     let remainingSeconds: number | undefined;
+    let interacted = false;
     let timeout: ReturnType<typeof setTimeout> | undefined;
     let countdown: ReturnType<typeof setInterval> | undefined;
 
@@ -153,9 +397,20 @@ async function showPermissionPromptUnlocked(
       clearPromptTimers();
       done(result);
     };
+    /**
+     * The countdown is a user-away guard, not a wall clock: the first input a handler consumes
+     * stops it for good. Unmatched terminal bytes (mouse reports, focus events, paste wrappers)
+     * never reach this, so a stray sequence cannot keep the agent blocked forever.
+     */
+    const markInteracted = (): void => {
+      if (interacted) return;
+      interacted = true;
+      clearPromptTimers();
+      remainingSeconds = undefined;
+      tui.requestRender();
+    };
 
     const selectedOption = (): PromptOption => options[selectedIndex] ?? options[0]!;
-    const isAllowOption = (option: PromptOption): boolean => option.action !== "abort";
     const updateFocus = (): void => {
       input.focused = componentFocused && editing;
     };
@@ -193,7 +448,10 @@ async function showPermissionPromptUnlocked(
     if (timeoutMs !== undefined) {
       const deadlineMs = Date.now() + timeoutMs;
       remainingSeconds = permissionPromptRemainingSeconds(deadlineMs);
-      timeout = setTimeout(() => resolve("abort"), timeoutMs);
+      timeout = setTimeout(
+        () => finish({ action: "abort", value: originalValue, reason: "timeout" }),
+        timeoutMs,
+      );
       countdown = setInterval(
         () => {
           const nextRemainingSeconds = permissionPromptRemainingSeconds(deadlineMs);
@@ -214,59 +472,27 @@ async function showPermissionPromptUnlocked(
         updateFocus();
       },
       render(width: number): string[] {
-        const lines = wrapTextWithAnsi(theme.fg("warning", title), width);
-        if (remainingSeconds !== undefined) {
-          lines.push(
-            truncateToWidth(
-              theme.fg(
-                "warning",
-                `⏳ Auto-abort in ${remainingSeconds}s (permission stays blocked)`,
-              ),
-              width,
-            ),
-          );
-        }
-        lines.push("");
-        for (let i = 0; i < options.length; i++) {
-          const option = options[i]!;
-          const isSelected = i === selectedIndex;
-          const prefix = isSelected ? " → " : "   ";
-          const keyHint = theme.fg("accent", `[${option.key}]`);
-          let label = option.label;
-
-          if (editing && isSelected && isAllowOption(option)) {
-            const separator = " ";
-            const inputWidth = Math.max(
-              1,
-              width - visibleWidth(`${prefix}${keyHint} ${label}${separator}`),
-            );
-            label += `${separator}${theme.fg("accent", input.render(inputWidth)[0] ?? "")}`;
-          } else if (option.hint) {
-            label += `  ${theme.fg("dim", option.hint)}`;
-          }
-          if (pendingAction === option.action) {
-            label += `  ${theme.fg("warning", "→ press Enter to confirm")}`;
-          }
-          lines.push(truncateToWidth(`${prefix}${keyHint} ${label}`, width));
-          if (editing && isSelected && error) {
-            lines.push(truncateToWidth(theme.fg("error", `   ✗ ${error}`), width));
-          }
-        }
-        lines.push("");
-        const footer = editing
-          ? "↑↓ navigate, enter confirm, esc reset, ctrl+c cancel"
-          : pendingAction
-            ? "↑↓ navigate, tab edit, enter confirm, esc/ctrl+c cancel"
-            : "↑↓ navigate, tab edit, enter select, esc/ctrl+c cancel";
-        lines.push(truncateToWidth(theme.fg("dim", footer), width));
-        return lines;
+        return promptLines(spec, {
+          width,
+          rows: tui.terminal?.rows ?? 24,
+          theme,
+          selectedIndex,
+          pendingAction,
+          editing,
+          input: (inputWidth) => input.render(inputWidth)[0] ?? "",
+          error,
+          remainingSeconds,
+          options,
+        });
       },
       handleInput(data: string): void {
         if (matchesKey(data, Key.ctrl("c"))) {
+          markInteracted();
           resolve("abort");
           return;
         }
         if (editing) {
+          markInteracted();
           if (matchesKey(data, Key.escape)) {
             stopEditing();
             tui.requestRender();
@@ -290,42 +516,42 @@ async function showPermissionPromptUnlocked(
           return;
         }
         if (matchesKey(data, Key.escape)) {
+          markInteracted();
           resolve("abort");
           return;
         }
-        if (matchesKey(data, Key.tab) && isAllowOption(selectedOption())) {
+        if (matchesKey(data, Key.tab) && isGrantAction(selectedOption().action)) {
+          markInteracted();
           beginEditing();
           tui.requestRender();
           return;
         }
         if (matchesKey(data, Key.enter)) {
+          markInteracted();
           resolve(pendingAction ?? selectedOption().action);
           return;
         }
         if (matchesKey(data, Key.up) || matchesKey(data, Key.down)) {
+          markInteracted();
           const delta = matchesKey(data, Key.up) ? -1 : 1;
           selectedIndex = Math.max(0, Math.min(options.length - 1, selectedIndex + delta));
           pendingAction = null;
           tui.requestRender();
           return;
         }
-        for (let i = 0; i < options.length; i++) {
-          const option = options[i]!;
-          if (data === option.key) {
-            resolve(option.action);
-            return;
-          }
-          if (data.toLowerCase() === option.key.toLowerCase()) {
-            if (option.confirm) {
-              pendingAction = option.action;
-              selectedIndex = i;
-            } else {
-              resolve(option.action);
-            }
-            tui.requestRender();
-            return;
-          }
+        const option = options.find(
+          (candidate) => candidate.key.toLowerCase() === data.toLowerCase(),
+        );
+        if (!option) return;
+        markInteracted();
+        if (option.confirm) {
+          pendingAction = option.action;
+          selectedIndex = options.indexOf(option);
+        } else {
+          resolve(option.action);
+          return;
         }
+        tui.requestRender();
       },
       invalidate(): void {
         input.invalidate();
@@ -342,7 +568,7 @@ async function showPermissionPromptUnlocked(
 export async function showPermissionPrompt(
   pi: ExtensionAPI,
   ctx: ExtensionContext,
-  title: string,
+  spec: PermissionPromptSpec,
   originalValue: string,
   validateValue: (value: string) => string | null,
   timeoutSeconds?: number,
@@ -352,7 +578,7 @@ export async function showPermissionPrompt(
     showPermissionPromptUnlocked(
       pi,
       ctx,
-      title,
+      spec,
       originalValue,
       validateValue,
       timeoutSeconds,
@@ -375,77 +601,57 @@ const validRule = (
 export function promptDomainBlock(
   pi: ExtensionAPI,
   ctx: ExtensionContext,
-  domain: string,
+  spec: PermissionPromptSpec,
+  originalValue: string,
+  _deny: string[] = [],
   timeoutSeconds?: number,
-): Promise<ProfilePermissionPromptResult> {
+  customOptions?: PromptOption[],
+): Promise<PermissionPromptResult> {
   return showPermissionPrompt(
     pi,
     ctx,
-    `🌐 Network blocked: "${domain}" is not in allowedDomains`,
-    domain,
-    (value) => validRule(value, domainIsAllowed(domain, [value]), `domain "${domain}"`),
+    spec,
+    originalValue,
+    (value) => validRule(value, domainIsAllowed(spec.subject, [value]), `domain "${spec.subject}"`),
     timeoutSeconds,
-  ) as Promise<ProfilePermissionPromptResult>;
+    customOptions,
+  );
 }
 
 export function promptReadBlock(
   pi: ExtensionAPI,
   ctx: ExtensionContext,
-  path: string,
+  spec: PermissionPromptSpec,
+  originalValue: string,
   deny: string[],
   timeoutSeconds?: number,
-): Promise<ProfilePermissionPromptResult> {
+): Promise<PermissionPromptResult> {
   return showPermissionPrompt(
     pi,
     ctx,
-    `📖 Read blocked: "${path}" is not in allowRead`,
-    path,
-    (value) => validRule(value, matchesPattern(path, [value]), `path "${path}"`, deny),
+    spec,
+    originalValue,
+    (value) =>
+      validRule(value, matchesPattern(spec.subject, [value]), `path "${spec.subject}"`, deny),
     timeoutSeconds,
-  ) as Promise<ProfilePermissionPromptResult>;
+  );
 }
 
 export function promptWriteBlock(
   pi: ExtensionAPI,
   ctx: ExtensionContext,
-  path: string,
+  spec: PermissionPromptSpec,
+  originalValue: string,
   deny: string[],
   timeoutSeconds?: number,
-): Promise<ProfilePermissionPromptResult> {
+): Promise<PermissionPromptResult> {
   return showPermissionPrompt(
     pi,
     ctx,
-    `📝 Write blocked: "${path}" is not in allowWrite`,
-    path,
-    (value) => validRule(value, matchesPattern(path, [value]), `path "${path}"`, deny),
+    spec,
+    originalValue,
+    (value) =>
+      validRule(value, matchesPattern(spec.subject, [value]), `path "${spec.subject}"`, deny),
     timeoutSeconds,
-  ) as Promise<ProfilePermissionPromptResult>;
-}
-
-export function formatSandboxConfiguration(
-  profilePath: string,
-  policy: ProfilePolicy,
-  allowances: SessionAllowances,
-): string {
-  return [
-    "Sandbox Configuration",
-    `  Profile: ${profilePath}`,
-    "",
-    "Network (bash + !cmd):",
-    `  Block network:   ${policy.blockNetwork ? "yes" : "no"}`,
-    `  Allowed domains: ${policy.allowedDomains.join(", ") || "(none in this profile)"}`,
-    ...(allowances.domains.length ? [`  Session allowed: ${allowances.domains.join(", ")}`] : []),
-    "",
-    "Filesystem (bash + read/write/edit/grep/find/ls tools):",
-    `  Allow (read+write): ${policy.allowWrite.join(", ") || "(none)"}`,
-    `  Allow read:         ${policy.allowRead.join(", ") || "(none)"}`,
-    `  Hard-denied:        ${policy.deny.length > 0 ? `${policy.deny.length} path(s) from filesystem.deny (no prompt)` : "(none)"}`,
-    ...(allowances.readPaths.length ? [`  Session read:  ${allowances.readPaths.join(", ")}`] : []),
-    ...(allowances.writePaths.length
-      ? [`  Session write: ${allowances.writePaths.join(", ")}`]
-      : []),
-    "",
-    "Policy lives in the nono profile; edit it and restart affected bash calls to apply.",
-    "Note: filesystem.deny must not overlap an allowed parent, or nono refuses to start on Linux.",
-  ].join("\n");
+  );
 }

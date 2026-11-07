@@ -9,11 +9,13 @@ import {
   addAllowPathToProfile,
   addDomainToProfile,
   addReadPathToProfile,
+  addWritePathToProfile,
   defaultProfilePath,
   effectivePolicy,
   expandHome,
   requireProfile,
   resolveProfilePath,
+  writeProfileChecked,
 } from "../src/profile.ts";
 
 const SKELETON = {
@@ -224,4 +226,80 @@ test("profile writers create missing filesystem and network sections", () => {
   const written = JSON.parse(readFileSync(path, "utf8"));
   assert.deepEqual(written.filesystem.allow, ["/created"]);
   assert.deepEqual(written.meta, { name: "pi" });
+});
+
+// A hand-authored profile: compact, single-quoted-nowhere formatting that no
+// re-serialization would reproduce, so a rollback can be checked byte for byte.
+const HAND_WRITTEN =
+  '{\n  "meta": {"name": "pi", "author": "someone"},\n  "filesystem": {"allow": ["."]}\n}\n';
+
+test("writeProfileChecked restores the original bytes when validation fails", () => {
+  const path = tempProfile(HAND_WRITTEN);
+  const validated: string[] = [];
+
+  const result = writeProfileChecked(
+    path,
+    (profile) => {
+      const filesystem = (profile.filesystem ??= {});
+      filesystem.allow = [...(filesystem.allow ?? []), "/added"];
+    },
+    (profilePath) => {
+      validated.push(profilePath);
+      // The candidate write is on disk while the validator runs.
+      assert.deepEqual(JSON.parse(readFileSync(profilePath, "utf8")).filesystem.allow, [
+        ".",
+        "/added",
+      ]);
+      return { ok: false, detail: "nono could not resolve the profile: base profile not found" };
+    },
+  );
+
+  assert.deepEqual(validated, [path]);
+  assert.deepEqual(result, {
+    ok: false,
+    detail: "nono could not resolve the profile: base profile not found",
+    restored: true,
+  });
+  // Byte-for-byte, not a JSON re-serialization of the parsed profile.
+  assert.equal(readFileSync(path, "utf8"), HAND_WRITTEN);
+});
+
+test("writeProfileChecked keeps the new entry when validation passes", () => {
+  const path = tempProfile(SKELETON);
+
+  const result = writeProfileChecked(
+    path,
+    (profile) => {
+      const filesystem = (profile.filesystem ??= {});
+      filesystem.allow = [...(filesystem.allow ?? []), "/added"];
+    },
+    () => ({ ok: true, detail: "" }),
+  );
+
+  assert.deepEqual(result, { ok: true });
+  const text = readFileSync(path, "utf8");
+  assert.equal(text, JSON.stringify(JSON.parse(text), null, 2) + "\n");
+  const written = JSON.parse(text);
+  assert.deepEqual(written.filesystem.allow, [".", "/added"]);
+  assert.deepEqual(written.network.allow_domain, []);
+});
+
+test("profile writers validate and roll back through their optional validator", () => {
+  const path = tempProfile(HAND_WRITTEN);
+
+  const rejected = addDomainToProfile(path, "example.com", (profilePath) => {
+    assert.deepEqual(JSON.parse(readFileSync(profilePath, "utf8")).network.allow_domain, [
+      "example.com",
+    ]);
+    return { ok: false, detail: "resolution failed" };
+  });
+
+  assert.deepEqual(rejected, { ok: false, detail: "resolution failed", restored: true });
+  assert.equal(readFileSync(path, "utf8"), HAND_WRITTEN);
+
+  // `filesystem.write` is write-only, so it is appended beside `allow`, not into it.
+  assert.deepEqual(addWritePathToProfile(path, "/write-only"), { ok: true });
+  const written = JSON.parse(readFileSync(path, "utf8"));
+  assert.deepEqual(written.filesystem.write, ["/write-only"]);
+  assert.deepEqual(written.filesystem.allow, ["."]);
 });

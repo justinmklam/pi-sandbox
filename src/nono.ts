@@ -15,6 +15,10 @@ function unique(values: string[]): string[] {
   return [...new Set(values)];
 }
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 function isExistingFile(path: string): boolean {
   try {
     return statSync(path).isFile();
@@ -208,6 +212,27 @@ export function resolveEffectiveProfile(nonoPath: string, profilePath: string): 
       deny: unique([...stringArray(filesystem.deny), ...manifestDeny]),
     },
   };
+}
+
+/**
+ * Check that a profile still resolves exactly as the runtime will resolve it.
+ *
+ * `nono profile validate` is deliberately not used: it checks the raw file's
+ * schema, while the runtime trusts `resolveEffectiveProfile`, which also
+ * resolves `extends`, platform overrides, and deny groups. A profile can pass
+ * schema validation and still fail at startup, so writes are verified with the
+ * same call the runtime makes.
+ */
+export function validateProfile(
+  nonoPath: string,
+  profilePath: string,
+): { ok: boolean; detail: string } {
+  try {
+    resolveEffectiveProfile(nonoPath, profilePath);
+    return { ok: true, detail: "" };
+  } catch (error) {
+    return { ok: false, detail: errorMessage(error) };
+  }
 }
 
 const EXIT_STDIO_GRACE_MS = 100;

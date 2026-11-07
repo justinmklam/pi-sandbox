@@ -506,3 +506,22 @@ test("a collapsed write row stays correct across a growing stream", () => {
     assert.ok(line.includes(`(${i} lines)`), `${i} lines: ${line}`);
   }
 });
+
+test("a denial hint adds exactly one warning line to the shell box", () => {
+  const input = {
+    command: "cat /tmp/x",
+    output: "cat: /tmp/x: Operation not permitted",
+    isError: true,
+    durationMs: 10,
+    theme,
+  };
+  const plain = new BashBoxComponent(input).render(80);
+  const hinted = new BashBoxComponent({
+    ...input,
+    hint: "⛔ write: /tmp/x · fix: /sandbox fix 7",
+  }).render(80);
+
+  assert.equal(hinted.length, plain.length + 1);
+  assert.equal(hinted.filter((line) => line.includes("⛔")).length, 1);
+  assert.ok(hinted.every((line) => piVisibleWidth(line) <= 80));
+});

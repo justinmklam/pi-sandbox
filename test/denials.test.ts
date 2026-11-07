@@ -1,0 +1,282 @@
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import test from "node:test";
+
+import assert from "node:assert/strict";
+
+import {
+  appendHeadlessSuffix,
+  classifyDenial,
+  headlessSuffix,
+  type SandboxDenial,
+  upsertDenial,
+} from "../src/denials.ts";
+import { canonicalizePath } from "../src/policy.ts";
+import { describeFix, formatDenials, parseSandboxCommand } from "../src/sandbox-format.ts";
+
+function withTempDir(run: (root: string) => void): void {
+  const root = mkdtempSync(join(tmpdir(), "pi-sandbox-denials-"));
+  try {
+    run(root);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+test("classifies a denied command domain from policy, not stderr", () => {
+  const classified = classifyDenial({
+    tool: "bash",
+    command: "curl -sS https://blocked.example.com/data",
+    // Stderr names a different host and a proxy; the command's host wins.
+    output:
+      "curl: (56) CONNECT tunnel failed, response 403\nFailed to connect to other.example.org port 443",
+    allowedDomains: ["github.com"],
+  });
+  assert.deepEqual(classified, {
+    kind: "domain",
+    target: "blocked.example.com",
+    fix: { type: "profile-domain", entry: "blocked.example.com" },
+  });
+});
+
+test("classifies a bash write denial as filesystem.write, never filesystem.allow", () => {
+  withTempDir((root) => {
+    const target = join(root, "nested", "new", "file.txt");
+    const classified = classifyDenial({
+      tool: "bash",
+      command: `touch ${target}`,
+      output: `/bin/bash: line 1: ${target}: Operation not permitted`,
+    });
+    assert.equal(classified.kind, "write");
+    assert.equal(classified.target, canonicalizePath(target));
+    assert.deepEqual(classified.fix, {
+      type: "profile-path",
+      field: "filesystem.write",
+      entry: join(canonicalizePath(root), "nested", "new"),
+    });
+    // The whole point: a write denial must never derive a read+write grant.
+    assert.notEqual(
+      classified.fix !== null && classified.fix.type === "profile-path"
+        ? classified.fix.field
+        : null,
+      "filesystem.allow",
+    );
+  });
+});
+
+test("classifies tool-target read and write blocks", () => {
+  withTempDir((root) => {
+    const path = join(root, "docs", "notes.md");
+    mkdirSync(dirname(path), { recursive: true });
+
+    const read = classifyDenial({ tool: "read", target: path });
+    assert.equal(read.kind, "read");
+    assert.equal(read.target, canonicalizePath(path));
+    assert.deepEqual(read.fix, {
+      type: "profile-path",
+      field: "filesystem.read",
+      entry: canonicalizePath(dirname(path)),
+    });
+
+    const write = classifyDenial({ tool: "edit", target: path });
+    assert.equal(write.kind, "write");
+    assert.deepEqual(write.fix, {
+      type: "profile-path",
+      field: "filesystem.write",
+      entry: canonicalizePath(dirname(path)),
+    });
+  });
+});
+
+test("never widens a denial to the filesystem root or the home directory", () => {
+  // A direct child of $HOME grants the file, not the whole home directory.
+  const inHome = classifyDenial({ tool: "write", target: join(homedir(), "notes.txt") });
+  assert.deepEqual(inHome.fix, {
+    type: "profile-path",
+    field: "filesystem.write",
+    entry: canonicalizePath(join(homedir(), "notes.txt")),
+  });
+
+  withTempDir((root) => {
+    const nested = join(root, "nested", "file.txt");
+    const read = classifyDenial({ tool: "read", target: nested });
+    assert.deepEqual(read.fix, {
+      type: "profile-path",
+      field: "filesystem.read",
+      entry: canonicalizePath(join(root, "nested")),
+    });
+  });
+});
+
+test("classifies proxy and port denials", () => {
+  const withHost = classifyDenial({
+    tool: "bash",
+    command: "./deploy.sh",
+    output:
+      "curl: (7) Failed to connect to api.example.com port 8443 after 5 ms: CONNECT tunnel failed",
+  });
+  assert.deepEqual(withHost, {
+    kind: "domain",
+    target: "api.example.com",
+    fix: { type: "profile-domain", entry: "api.example.com" },
+  });
+
+  const portOnly = classifyDenial({
+    tool: "bash",
+    command: "./deploy.sh",
+    output: "Received HTTP code 403 from proxy after CONNECT; proxy refused port 8443",
+  });
+  assert.equal(portOnly.kind, "port");
+  assert.deepEqual(portOnly.fix, { type: "profile-port", port: 8443 });
+
+  const noPort = classifyDenial({
+    tool: "bash",
+    command: "./deploy.sh",
+    output: "Received HTTP code 403 from proxy after CONNECT",
+  });
+  assert.equal(noPort.kind, "port");
+  assert.equal(noPort.fix, null);
+});
+
+test("classifies a sandbox permission error as a command denial", () => {
+  withTempDir((root) => {
+    const classified = classifyDenial({
+      tool: "bash",
+      command: "pnpm test -- -u",
+      output: "Operation not permitted",
+      cwd: root,
+    });
+    assert.equal(classified.kind, "command");
+    assert.equal(classified.target, "pnpm test -- -u");
+    assert.deepEqual(classified.fix, { type: "command-argv", argv: [["pnpm", "test"]] });
+  });
+});
+
+test("an offline-style ENOTFOUND is not a policy denial", () => {
+  const classified = classifyDenial({
+    tool: "bash",
+    command: "./script.sh",
+    output:
+      "getaddrinfo ENOTFOUND api.example.com\n    at GetAddrInfoReqWrap.onlookupall\ncurl: (6) Could not resolve host: api.example.com",
+    allowedDomains: ["api.example.com"],
+  });
+  assert.equal(classified.kind, "unknown");
+  assert.equal(classified.fix, null);
+  assert.equal(classified.target, "./script.sh");
+});
+
+test("unrecognised failures record as unknown with no fix", () => {
+  const classified = classifyDenial({
+    tool: "bash",
+    command: "make test",
+    output: "exit status 2",
+  });
+  assert.deepEqual(classified, { kind: "unknown", target: "make test", fix: null });
+});
+
+test("headlessSuffix is empty for interactive sessions", () => {
+  assert.equal(headlessSuffix(true, "/home/u/.config/nono/profiles/pi.json"), "");
+});
+
+test("headlessSuffix names the profile and the command config", () => {
+  const suffix = headlessSuffix(false, "/profiles/pi.json");
+  assert.match(suffix, /^ Non-interactive session: /);
+  assert.match(suffix, /add the rule to \/profiles\/pi\.json/);
+  assert.match(suffix, /sandbox\.json/);
+  assert.match(suffix, /--no-sandbox/);
+});
+
+test("appendHeadlessSuffix appends exactly once and leaves interactive messages alone", () => {
+  const message = 'Sandbox: write access denied for "/tmp/x"';
+  const profile = "/profiles/pi.json";
+
+  // Interactive: byte-identical.
+  assert.equal(appendHeadlessSuffix(message, true, profile), message);
+
+  const once = appendHeadlessSuffix(message, false, profile);
+  assert.notEqual(once, message);
+  assert.equal(once, message + headlessSuffix(false, profile));
+  assert.equal(appendHeadlessSuffix(once, false, profile), once);
+  assert.equal(once.split("Non-interactive session").length - 1, 1);
+});
+
+test("upsertDenial numbers records monotonically and dedupes by kind and target", () => {
+  const log: SandboxDenial[] = [];
+  const base = {
+    at: 1_700_000_000_000,
+    kind: "write" as const,
+    target: "/tmp/x",
+    tool: "bash",
+    reason: "aborted" as const,
+    fix: null,
+  };
+  const first = upsertDenial(log, base, 1);
+  assert.equal(first.added, true);
+  assert.equal(first.record.n, 1);
+  assert.equal(first.record.count, 1);
+
+  const second = upsertDenial(log, { ...base, reason: "denied-session" }, first.nextN);
+  assert.equal(second.added, false);
+  assert.equal(second.record.n, 1);
+  assert.equal(second.record.count, 2);
+  assert.equal(second.record.reason, "denied-session");
+  assert.equal(log.length, 1);
+
+  const third = upsertDenial(log, { ...base, target: "/tmp/y" }, second.nextN);
+  assert.equal(third.added, true);
+  assert.equal(third.record.n, 2);
+  assert.equal(log.length, 2);
+});
+
+test("formatDenials names the stable number and the fix", () => {
+  const denials: SandboxDenial[] = [
+    {
+      n: 3,
+      at: 1_700_000_000_000,
+      kind: "write",
+      target: "/home/u/project/out.txt",
+      tool: "write",
+      reason: "aborted",
+      fix: { type: "profile-path", field: "filesystem.write", entry: "/home/u/project" },
+      count: 1,
+    },
+    {
+      n: 4,
+      at: 1_700_000_001_000,
+      kind: "unknown",
+      target: "make test",
+      tool: "bash",
+      reason: "failed",
+      fix: null,
+      count: 1,
+    },
+  ];
+  const text = formatDenials(denials);
+  assert.match(
+    text,
+    /#3 .* write \/home\/u\/project\/out\.txt — filesystem\.write \+= \/home\/u\/project/,
+  );
+  assert.match(text, /#4 .* unknown make test — no automatic fix/);
+  assert.equal(formatDenials([]), "No sandbox denials recorded this session.");
+});
+
+test("describeFix summarises every fix kind", () => {
+  assert.equal(describeFix(null), "no automatic fix");
+  assert.equal(
+    describeFix({ type: "profile-domain", entry: "example.com" }),
+    "network.allow_domain += example.com",
+  );
+  assert.equal(describeFix({ type: "profile-port", port: 443 }), "network.connect_port += 443");
+  assert.equal(describeFix({ type: "command-argv", argv: [["pnpm", "test"]] }), "pnpm test");
+});
+
+test("parseSandboxCommand defaults to status and accepts every subcommand", () => {
+  assert.deepEqual(parseSandboxCommand(""), { sub: "status", rest: [] });
+  assert.deepEqual(parseSandboxCommand("allow write /tmp/x"), {
+    sub: "allow",
+    rest: ["write", "/tmp/x"],
+  });
+  assert.deepEqual(parseSandboxCommand("fix 12"), { sub: "fix", rest: ["12"] });
+  assert.deepEqual(parseSandboxCommand("nonsense"), { sub: "help", rest: ["nonsense"] });
+});

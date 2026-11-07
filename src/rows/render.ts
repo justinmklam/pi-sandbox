@@ -34,6 +34,9 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 
+import type { SandboxDenial } from "../denials.ts";
+
+import { denialHint } from "../sandbox-format.ts";
 import { BashBoxComponent } from "./bash-box.ts";
 import { CONFIG } from "./config.ts";
 import { countDiffLines, formatDuration, parseShellOutcome, type Row } from "./format.ts";
@@ -235,6 +238,16 @@ function renderResult(
   // `edit`'s diff arrives here but its row is drawn in the call slot, so stash the counts and
   // redraw that row in place. Nothing is emitted into the result slot while collapsed, which
   // is what removes the diff block.
+  const denial = (result as any)?.details?.sandboxDenial as SandboxDenial | undefined;
+  if (name !== "edit" && denial && context.isError === true) {
+    const row = withMeta(buildRow(name, context.args, context.cwd), name, state, context);
+    row.suffix = "⛔";
+    const rowComponent = context.lastComponent;
+    if (rowComponent && typeof (rowComponent as any).setRow === "function") {
+      (rowComponent as any).setRow(row);
+    }
+  }
+
   if (name === "edit" && !options.expanded) {
     const diff = context.isError ? undefined : (result as any)?.details?.diff;
     const stats = diff ? countDiffLines(diff) : undefined;
@@ -286,6 +299,7 @@ function renderBashResult(
 
   // Expanded stays inside the same frame as the collapsed box: every output line and the whole
   // command (wrapped across rows) instead of the preview and the middle-clipped command.
+  const denial = (result as any)?.details?.sandboxDenial as SandboxDenial | undefined;
   return new BashBoxComponent({
     command: typeof context.args?.command === "string" ? context.args.command : "",
     output,
@@ -293,6 +307,7 @@ function renderBashResult(
     durationMs: elapsed(state),
     theme,
     expanded,
+    hint: denial ? denialHint(denial) : undefined,
   }) as unknown as Component;
 }
 

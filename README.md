@@ -50,6 +50,8 @@ are stored separately in the pi-sandbox configuration file at
 |----------|---------|---------|
 | `PI_SANDBOX_NONO_PROFILE` | `$XDG_CONFIG_HOME/nono/profiles/pi.json` (usually `~/.config/nono/profiles/pi.json`) | Path to the nono profile. |
 | `PI_SANDBOX_NONO` | `nono` | Path to the nono binary. |
+| `PI_SANDBOX_PROMPT_TIMEOUT_SECONDS` | `30` | Seconds before an untouched permission prompt auto-aborts. `0` disables the timeout. Read once at launch. |
+| `PI_SANDBOX_DEBUG` | unset | Set to `1` to emit sandbox decision diagnostics as `sandbox-debug` messages. |
 
 Global and directory-specific approvals for running individual commands outside the
 sandbox are stored in `~/.pi/agent/sandbox.json` using this shape:
@@ -59,6 +61,7 @@ sandbox are stored in `~/.pi/agent/sandbox.json` using this shape:
   "commands": {
     "global": {
       "exact": ["docker system prune"],
+      "argv": [["docker", "system", "prune"]],
       "prefixes": ["poetry run pytest"],
       "unsafePrefixes": ["poetry run tests/"],
       "unsafeContains": ["poetry run pytest"]
@@ -66,6 +69,7 @@ sandbox are stored in `~/.pi/agent/sandbox.json` using this shape:
     "directories": {
       "/path/to/project": {
         "exact": ["make build"],
+        "argv": [["make", "build"], ["pnpm", "test"]],
         "prefixes": ["poetry run pytest"],
         "unsafePrefixes": ["poetry run tests/"],
         "unsafeContains": ["make test"]
@@ -114,6 +118,16 @@ literal text appears anywhere in the command, including when the command is chai
 piped, redirected, or otherwise composed. For example, `make test` matches both `make
 test` and `cd project && make test`. Keep these strings narrow and only add them manually
 to `sandbox.json`; interactive approval prompts do not create unsafe substring rules.
+
+`argv` rules are the form interactive approvals create. They match per shell segment:
+`["pnpm", "test"]` matches `pnpm test`, `pnpm test -t x`, and
+`cd /repo && pnpm test -- -u`, but not `cd /other && pnpm test` for a
+project-scoped rule, and not a pipeline segment whose program has no rule. A leading
+`cd` is consumed into the segment's directory and needs no rule of its own. Commands
+containing substitution (`$()`, backticks) or redirection (`<`, `>`) cannot be
+represented and fall back to exact approval. A single-token rule is broad: it matches
+every invocation of that program, so prompts label it `(broad)`. `exact`, `prefixes`,
+`unsafePrefixes`, and `unsafeContains` keep working as documented below.
 
 The older array form is still read as a list of exact commands.
 
@@ -224,14 +238,23 @@ validity flags are macOS-only. Windows is not supported.
 
 ```
 pi --no-sandbox                            disable sandboxing for the session
-Alt+S                                      toggle sandboxing on/off for the session
-/sandbox                                   show the profile path and derived policy
-/sandbox-enable                            enable the sandbox for this session
-/sandbox-disable                           disable the sandbox for this session
-/sandbox-allow domain <url>                prompt to add a domain to network.allow_domain
-/sandbox-allow read <path>                 prompt to add a path to filesystem.read
-/sandbox-allow write <path>                prompt to add a path to filesystem.allow
+Alt+S                                      toggle the sandbox; retries when it is unavailable
+/sandbox                                   same as /sandbox status
+/sandbox status                            state, profile, policy, session grants, and approvals
+/sandbox denials                           list this session's denials with their #n
+/sandbox fix <n>                           apply the recorded fix for denial #n
+/sandbox revoke <command>                  remove command approvals matching that command
+/sandbox allow domain <url>                prompt to add a domain to network.allow_domain
+/sandbox allow read <path>                 prompt to add a path to filesystem.read
+/sandbox allow write <path>                prompt to add a path to filesystem.write
+/sandbox enable | disable | help           enable, disable, or show help
+/sandbox-enable, /sandbox-disable          legacy aliases for the same handlers
+/sandbox-allow <domain|read|write> <x>     legacy alias for /sandbox allow
 ```
+
+Only command approvals in `sandbox.json` can be revoked. Profile grants may be inherited
+through `extends`, so `/sandbox revoke` never edits the nono profile; remove those rules
+there by hand.
 
 ## What it does
 
@@ -252,26 +275,49 @@ bash and every sandboxed tool, and says so in the footer, until the profile
 resolves again. The raw file would drop `extends` and leave `workdir` unset, which
 is a different policy from the one nono enforces.
 
-When a block is triggered, a prompt appears with four options. Permission prompts are
-serialized, so concurrent blocked commands are handled one at a time rather than
-competing for the single interactive prompt. Permission overrides granted manually
-are also recorded in the session as `sandbox-override` messages, including the
-command/path, scope, and timestamp, so the agent can distinguish a manual grant
-from normal sandboxed execution. Permission prompts automatically select **Abort
-(keep blocked)** after 2 minutes. A timeout never grants permission.
+When a block is triggered, a prompt reads top to bottom as four levels: the reason, the
+denied subject, the rule that would fix it and where it lands (the nono profile, or
+`sandbox.json` and its scope), then the decision. Permission prompts are serialized, so
+concurrent blocked commands are handled one at a time rather than competing for the single
+interactive prompt. Permission overrides granted manually are also recorded in the session
+as `sandbox-override` messages, including the command/path, scope, and timestamp, so the
+agent can distinguish a manual grant from normal sandboxed execution.
 
-- Abort (keep blocked)
-- Allow for this session only
-- Allow for this project — appended to the configured nono profile
-- Allow for all projects — appended to the configured nono profile
+The options, in order, are:
+
+- Allow once (`o`) — in memory only, removed when that call finishes
+- Allow for this session (`s`)
+- Save this rule to the profile (`p`) — validated against the runtime's own profile resolution, rolled back on failure, then written to the nono profile
+- Deny for this session (`d`) — never prompt for that target again this session
+- Abort (keep blocked) (`esc`, preselected)
+
+Abort is preselected, so granting anything takes at least two keystrokes: navigate (or
+press its shortcut) and then Enter. A confirming option always needs a second Enter, so one
+stray keypress can never persist a rule.
+
+An untouched prompt auto-aborts after 30 seconds (`PI_SANDBOX_PROMPT_TIMEOUT_SECONDS`,
+read at launch; `0` disables it). A timeout never grants permission. The first input the
+prompt handles stops the countdown for good, so it cannot fire while you are reading or
+editing; unmatched terminal bytes (mouse reports, focus events) do not stop it.
 
 If a bash command still fails with an OS-level permission error, pi offers a separate
-choice to run that exact command outside the sandbox once, for the current session,
-in the current project directory, or globally. Directory approvals apply to the
-configured directory and its descendants; explicit wildcard directory keys can
-also cover sibling worktrees as described above. Global command approvals are
-written to `~/.pi/agent/sandbox.json`; use this only for commands you trust to run
-without sandbox enforcement.
+choice to run it outside the sandbox once, for this session, or to save argv rules for
+matching commands in this project or all projects. Directory approvals apply to the
+configured directory and its descendants; explicit wildcard directory keys can also cover
+sibling worktrees as described above. Command approvals are written to
+`~/.pi/agent/sandbox.json`; use this only for commands you trust to run without sandbox
+enforcement.
+
+### Denials and fixes
+
+Every terminal denial — prompt abort, timeout, deny-for-session, hard deny, or a failed
+command — is recorded with a stable `#n`, shown in the transcript as a `⛔` hint, and kept
+in the session file outside model context. `/sandbox denials` lists them.
+`/sandbox fix <n>` applies the recorded fix: it validates the profile with the same
+resolution the runtime uses, restores the original bytes if validation fails, repairs the
+sandbox state, and tells the agent the policy changed. It does not retry automatically;
+ask the agent to retry the blocked call. A successful fix also retries `enableSandbox`, so
+a sandbox that was unavailable because of a broken profile comes back.
 
 **Session allowances** are held in memory only. They are never written to disk
 and the agent has no way to read or modify them. They are reset when the
@@ -286,11 +332,17 @@ affected sessions to apply grants or revocations consistently.
 | Rule | Behaviour |
 |------|-----------|
 | Domain not in `network.allow_domain` | Prompted (bash and `!cmd`) |
-| Path not allowed for reads | Prompted (`read`, `grep`, `find`, `ls`); granting adds to `filesystem.read` |
-| Path not allowed for writes | Prompted (`write`, `edit`, and bash write failures); granting adds to `filesystem.allow` |
-| Bash command receives `Operation not permitted` or `Permission denied` | Prompted to run the exact command outside the sandbox |
-| `network.block: true` | Hard-blocked at OS level, no prompt |
-| `filesystem.deny`, including the `deny_credentials` / `deny_shell_history` groups it expands to | Hard-blocked, no prompt: pi reads the expanded list from nono's capability manifest and refuses the path, because a grant could never override it |
+| Path not allowed for reads | Prompted (`read`, `grep`, `find`, `ls`); granting adds to `filesystem.read` (read only) |
+| Path not allowed for writes | Prompted (`write`, `edit`, and bash write failures); granting adds to `filesystem.write` (write only, so a blocked `~/.ssh` write never widens reads) |
+| Bash command receives `Operation not permitted` or `Permission denied` | Prompted to run it outside the sandbox, or to save argv rules for matching commands |
+| `network.block: true` | Hard-blocked at OS level, no prompt. It cannot be combined with `network.allow_domain`, and `/sandbox fix` refuses to add one |
+| `filesystem.deny`, including the `deny_credentials` / `deny_shell_history` groups it expands to | Hard-blocked, no prompt. The hard-deny prompt names the matching `filesystem.deny` pattern (or says it came from a deny group), because no rule can grant it |
+| Network egress on a port | `network.connect_port` (Linux only) is the outbound setting; `network.open_port` is localhost TCP connect+bind. `connect_port` is refused on macOS |
+
+Any of the five prompt options can be reached with its shortcut; `d` denies the target for
+the rest of the session without prompting again, and `o` grants it only for the current call.
+The footer shows `🔒 sandbox`, `⚠ sandbox unavailable`, or `⏸ sandbox off`, so the state is
+legible even when the sandbox is disabled.
 
 `network.allow_domain` supports `*.example.com` wildcards. A profile that neither
 blocks the network nor names any `allow_domain` leaves all outbound domains

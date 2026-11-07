@@ -13,6 +13,7 @@ import {
   resolveEffectiveProfile,
   resolveNonoPath,
   supportsNodeEnvProxy,
+  validateProfile,
 } from "../src/nono.ts";
 
 function shellQuote(value: string): string {
@@ -410,3 +411,45 @@ test("exec rejects when an in-flight command is aborted", async (t) => {
     new Error("aborted"),
   );
 });
+
+/**
+ * `validateProfile` shells out to the real binary because resolving `extends`,
+ * platform overrides, and deny groups is nono's job — a stub would only test the
+ * stub. `PI_SANDBOX_NONO` selects the binary, as everywhere else.
+ */
+function installedNono(): string | null {
+  const nonoPath = resolveNonoPath();
+  try {
+    checkNonoAvailable(nonoPath);
+    return nonoPath;
+  } catch {
+    return null;
+  }
+}
+
+const REAL_NONO = installedNono();
+
+test(
+  "validateProfile accepts a resolvable profile and rejects an unresolvable extends",
+  { skip: REAL_NONO === null ? "nono is not installed" : false },
+  (t) => {
+    const nonoPath = REAL_NONO;
+    assert.ok(nonoPath);
+    const root = mkdtempSync(join(tmpdir(), "pi-sandbox-validate-"));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+
+    const resolvable = join(root, "resolvable.json");
+    writeFileSync(resolvable, JSON.stringify({ meta: { name: "pi" }, extends: "default" }));
+    const unresolvable = join(root, "unresolvable.json");
+    writeFileSync(
+      unresolvable,
+      JSON.stringify({ meta: { name: "pi" }, extends: "missing-base-profile" }),
+    );
+
+    assert.deepEqual(validateProfile(nonoPath, resolvable), { ok: true, detail: "" });
+
+    const rejected = validateProfile(nonoPath, unresolvable);
+    assert.equal(rejected.ok, false);
+    assert.match(rejected.detail, /missing-base-profile/);
+  },
+);
