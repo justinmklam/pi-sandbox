@@ -19,6 +19,7 @@ import {
   addUnsandboxedPrefix,
   argvSegments,
   deriveCommandArgv,
+  extractPermissionDeniedPath,
   hasUnsandboxedCommand,
   isSandboxPermissionError,
   loadUnsandboxedCommands,
@@ -256,6 +257,43 @@ test("recognizes only the sandbox's own permission errors", () => {
   assert.equal(isSandboxPermissionError("fatal: Permission denied (publickey)"), false);
   assert.equal(isSandboxPermissionError("command exited with status 1"), false);
   assert.equal(isSandboxPermissionError("ENOENT: no such file or directory"), false);
+});
+
+test("recognizes a child program's permission denial", () => {
+  // A child that opens the path itself prints its own name, so bash never reports it.
+  assert.equal(isSandboxPermissionError("wc: /home/u/.tmux.conf: Permission denied"), true);
+  assert.equal(
+    isSandboxPermissionError("ls: cannot open directory '/dev': Permission denied"),
+    true,
+  );
+  assert.equal(
+    isSandboxPermissionError(
+      "lsmod: ERROR: could not open '/sys/module/cifs/holders': Permission denied",
+    ),
+    true,
+  );
+  assert.equal(isSandboxPermissionError("find: './build': Permission denied"), true);
+  // A path-shaped token is required: prose that merely says "permission denied" is not the
+  // sandbox's doing (an ssh key rejection, a compiler note, a log line).
+  assert.equal(isSandboxPermissionError("glibc: Permission denied is a common errno"), false);
+  assert.equal(isSandboxPermissionError("head: cannot open 'build.log' for reading"), false);
+});
+
+test("extracts the path a child program was denied", () => {
+  assert.equal(
+    extractPermissionDeniedPath("wc: /home/u/.tmux.conf: Permission denied"),
+    "/home/u/.tmux.conf",
+  );
+  assert.equal(
+    extractPermissionDeniedPath("ls: cannot open directory '/dev': Permission denied"),
+    "/dev",
+  );
+  assert.equal(
+    extractPermissionDeniedPath("bash: line 1: /home/u/.ssh/id_rsa: Permission denied"),
+    "/home/u/.ssh/id_rsa",
+  );
+  assert.equal(extractPermissionDeniedPath("fatal: Permission denied (publickey)"), null);
+  assert.equal(extractPermissionDeniedPath("merge.c: Permission denied twice"), null);
 });
 
 test("splits, tokenizes, and scopes shell segments", () => {

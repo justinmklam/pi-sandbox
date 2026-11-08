@@ -957,7 +957,10 @@ export default function (pi: ExtensionAPI) {
         }
       }
 
-      if (sandboxEnabled && !sandboxError && ctx?.hasUI && (result as any).isError === true) {
+      // A denial in the output is the prompt's trigger, not the exit status: a compound
+      // command exits 0 after a failed `ls` or `wc`, and the user should still be offered
+      // the grant instead of the denial passing silently.
+      if (sandboxEnabled && !sandboxError && ctx?.hasUI) {
         const cause = blockedWrite
           ? "filesystem"
           : networkCause
@@ -965,8 +968,24 @@ export default function (pi: ExtensionAPI) {
             : isSandboxPermissionError(output)
               ? "sandbox"
               : null;
-        if (cause !== null && (await allowCommandOutsideSandbox(params.command, ctx, cause))) {
-          return localBash.execute(id, params, signal, onUpdate, ctx);
+        if (cause !== null) {
+          if (await allowCommandOutsideSandbox(params.command, ctx, cause)) {
+            return localBash.execute(id, params, signal, onUpdate, ctx);
+          }
+          if (cause === "sandbox") {
+            const resolved = policyOrError();
+            const denial = classifyAndRecord(
+              ctx,
+              {
+                tool: "bash",
+                command: params.command,
+                output,
+                allowedDomains: "policy" in resolved ? resolved.policy.allowedDomains : undefined,
+              },
+              "aborted",
+            );
+            return withDenial(result, denial);
+          }
         }
       }
       return result;

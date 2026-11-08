@@ -139,6 +139,44 @@ test("classifies proxy and port denials", () => {
   assert.equal(noPort.fix, null);
 });
 
+test("classifies a child program's read denial as filesystem.read", () => {
+  withTempDir((root) => {
+    const target = join(root, "home", ".tmux.conf");
+    const classified = classifyDenial({
+      tool: "bash",
+      command: `wc -l ${target}`,
+      // `wc` opens the path itself, so the denial names wc rather than bash.
+      output: `wc: ${target}: Permission denied`,
+      cwd: root,
+    });
+    assert.equal(classified.kind, "read");
+    assert.equal(classified.target, canonicalizePath(target));
+    assert.deepEqual(classified.fix, {
+      type: "profile-path",
+      field: "filesystem.read",
+      entry: canonicalizePath(join(root, "home")),
+    });
+  });
+});
+
+test("classifies a child program's write denial as filesystem.write", () => {
+  withTempDir((root) => {
+    const target = join(root, "out", "report.txt");
+    const classified = classifyDenial({
+      tool: "bash",
+      command: `mkdir -p ${target}`,
+      output: `mkdir: cannot create directory '${target}': Permission denied`,
+      cwd: root,
+    });
+    assert.equal(classified.kind, "write");
+    assert.deepEqual(classified.fix, {
+      type: "profile-path",
+      field: "filesystem.write",
+      entry: canonicalizePath(join(root, "out")),
+    });
+  });
+});
+
 test("classifies a sandbox permission error as a command denial", () => {
   withTempDir((root) => {
     const classified = classifyDenial({

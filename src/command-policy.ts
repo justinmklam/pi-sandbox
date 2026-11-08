@@ -518,14 +518,37 @@ export function hasUnsandboxedCommand(
 }
 
 /**
- * Only the sandbox's own denial shapes count. A plain `Permission denied` is an
- * ordinary filesystem error (a git remote rejecting a key, say), and treating it
- * as a sandbox block would offer a profile grant for a policy that is not at
- * fault.
+ * Bash reports the paths it opens itself (`bash: line 1: /p: Permission denied`) together
+ * with the EPERM shape the seatbelt backend uses.
+ */
+const BASH_DENIED_PATH =
+  /(?:\/bin\/bash|\/bin\/sh|bash|sh|zsh): (?:line \d+: )?(\/[^\s:]+): (?:Operation not permitted|Permission denied)/;
+
+/**
+ * A child program that opens the path itself prints its own name instead of bash's, and
+ * quotes the path when the message is prose: `wc: /p: Permission denied`,
+ * `ls: cannot open directory '/dev': Permission denied`. The path must be absolute or
+ * explicit-relative, so prose that merely contains "permission denied" stays unmatched.
+ */
+const CHILD_DENIED_PATH =
+  /(?:^|\s)(?:'([^'\n]+)'|"([^"\n]+)"|((?:~|\/|\.{1,2}\/)[^\s:'"]*)):\s*(?:Operation not permitted|Permission denied)\b/m;
+
+/** The path a permission denial names, whoever printed it. */
+export function extractPermissionDeniedPath(output: string): string | null {
+  const bash = BASH_DENIED_PATH.exec(output);
+  if (bash) return bash[1]!;
+  const child = CHILD_DENIED_PATH.exec(output);
+  if (child) return child[1] ?? child[2] ?? child[3] ?? null;
+  return null;
+}
+
+/**
+ * Whether a failure is the sandbox's doing. A path-shaped denial counts whichever process
+ * printed it, plus the bare EPERM shape; plain prose that says "permission denied" does
+ * not, because treating it as a sandbox block would offer a profile grant for a policy
+ * that is not at fault (a git remote rejecting a key, say).
  */
 export function isSandboxPermissionError(output: string): boolean {
-  if (/Operation not permitted/.test(output)) return true;
-  return /(?:\/bin\/bash|\/bin\/sh|bash|sh|zsh): (?:line \d+: )?\/[^\s:]+: Permission denied/.test(
-    output,
-  );
+  if (extractPermissionDeniedPath(output) !== null) return true;
+  return /Operation not permitted/.test(output);
 }

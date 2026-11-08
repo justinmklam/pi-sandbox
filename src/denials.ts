@@ -1,8 +1,9 @@
 import { homedir } from "node:os";
-import { dirname } from "node:path";
+import { basename, dirname, isAbsolute, resolve } from "node:path";
 
 import {
   deriveCommandArgv,
+  extractPermissionDeniedPath,
   isSandboxPermissionError,
   sandboxConfigPath,
 } from "./command-policy.ts";
@@ -49,6 +50,41 @@ export type SandboxDenial = {
 
 const READ_TOOLS = new Set(["read", "grep", "find", "ls"]);
 const WRITE_TOOLS = new Set(["write", "edit"]);
+
+/**
+ * Programs whose denials name a path they are writing, so the grant belongs in
+ * `filesystem.write`. Everything else is treated as a read: `filesystem.read` is the safe
+ * half (a wrong read grant cannot modify anything), and the prompt shows the rule before
+ * the user accepts it.
+ */
+const WRITE_PROGRAMS = new Set([
+  "chmod",
+  "chown",
+  "cp",
+  "dd",
+  "install",
+  "ln",
+  "mkdir",
+  "mv",
+  "patch",
+  "rm",
+  "rmdir",
+  "rsync",
+  "scp",
+  "tar",
+  "tee",
+  "touch",
+  "truncate",
+  "unzip",
+  "zip",
+]);
+
+/** Whether any shell segment in the command is a program that writes files. */
+function commandWritesFiles(command: string, cwd: string): boolean {
+  if (command.length === 0) return false;
+  const { argv } = deriveCommandArgv(command, cwd);
+  return argv.some((segment) => WRITE_PROGRAMS.has(basename(segment[0] ?? "")));
+}
 
 /**
  * `dirname` of the canonical path, unless that is `/` or the home directory, in
@@ -101,6 +137,20 @@ export function classifyDenial(input: {
   if (blockedWrite !== null) {
     const path = canonicalizePath(blockedWrite);
     return { kind: "write", target: path, fix: pathFix(path, "filesystem.write") };
+  }
+
+  // 2b. A child program that opened the path itself names it too, but nothing says which
+  // half of the policy is missing; the command decides.
+  const deniedPath = extractPermissionDeniedPath(output);
+  if (deniedPath !== null) {
+    const resolved = isAbsolute(deniedPath) ? deniedPath : resolve(cwd, deniedPath);
+    const path = canonicalizePath(resolved);
+    const writes = commandWritesFiles(command, cwd);
+    return {
+      kind: writes ? "write" : "read",
+      target: path,
+      fix: pathFix(path, writes ? "filesystem.write" : "filesystem.read"),
+    };
   }
 
   // 3-4. In-process tool blocks carry the target rather than stderr.
