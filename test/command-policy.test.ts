@@ -18,6 +18,7 @@ import {
   addUnsandboxedCommand,
   addUnsandboxedPrefix,
   argvSegments,
+  denialCause,
   deriveCommandArgv,
   extractPermissionDeniedPath,
   hasUnsandboxedCommand,
@@ -558,4 +559,35 @@ test("reports a malformed config and backs it up before the next write", () => {
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("a denial shape in a successful command's output is not a denial", () => {
+  // `git log -1 --format=%B` of a commit that documents denial shapes, a README table, or a
+  // grep for `Operation not permitted` all print text that looks like a sandbox block.
+  const printed =
+    "- Match the denial shapes a child program prints itself (`ls: cannot open directory '/p': Permission denied`)";
+  assert.equal(isSandboxPermissionError(printed), true);
+  assert.equal(
+    denialCause({ blockedWrite: false, networkCause: false, failed: false, output: printed }),
+    null,
+  );
+  assert.equal(
+    denialCause({ blockedWrite: false, networkCause: false, failed: true, output: printed }),
+    "sandbox",
+  );
+});
+
+test("denialCause keeps write and network causes ahead of the output scan", () => {
+  assert.equal(
+    denialCause({ blockedWrite: true, networkCause: false, failed: true, output: "" }),
+    "filesystem",
+  );
+  assert.equal(
+    denialCause({ blockedWrite: false, networkCause: true, failed: true, output: "" }),
+    "network",
+  );
+  assert.equal(
+    denialCause({ blockedWrite: false, networkCause: false, failed: true, output: "ok" }),
+    null,
+  );
 });

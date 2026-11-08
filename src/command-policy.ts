@@ -552,3 +552,21 @@ export function isSandboxPermissionError(output: string): boolean {
   if (extractPermissionDeniedPath(output) !== null) return true;
   return /Operation not permitted/.test(output);
 }
+
+/**
+ * Which recovery a finished bash call deserves. The output scan counts only when the command
+ * failed: a successful command cannot have been denied, and text it merely printed (a commit
+ * message quoting `ls: cannot open directory '/p': Permission denied`, a README table, a grep
+ * for `Operation not permitted`) is not evidence of a sandbox block.
+ */
+export function denialCause(input: {
+  blockedWrite: boolean;
+  networkCause: boolean;
+  failed: boolean;
+  output: string;
+}): "filesystem" | "network" | "sandbox" | null {
+  if (input.blockedWrite) return "filesystem";
+  if (input.networkCause) return "network";
+  if (input.failed && isSandboxPermissionError(input.output)) return "sandbox";
+  return null;
+}

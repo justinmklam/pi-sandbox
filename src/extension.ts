@@ -15,6 +15,7 @@ import { Key, Text } from "@earendil-works/pi-tui";
 
 import {
   addUnsandboxedArgv,
+  denialCause,
   deriveCommandArgv,
   hasUnsandboxedCommand,
   removeUnsandboxedCommand,
@@ -1044,17 +1045,17 @@ export default function (pi: ExtensionAPI) {
         }
       }
 
-      // A denial in the output is the prompt's trigger, not the exit status: a compound
-      // command exits 0 after a failed `ls` or `wc`, and the user should still be offered
-      // the grant instead of the denial passing silently.
+      // Only a failed command can have been denied. Scanning a successful command's output
+      // too made every command that prints a denial shape — `git log` of a commit that
+      // documents one, a README table, a grep for `Operation not permitted` — offer an
+      // escalation for a block that never happened.
       if (sandboxEnabled && !sandboxError && ctx?.hasUI) {
-        const cause = blockedWrite
-          ? "filesystem"
-          : networkCause
-            ? "network"
-            : isSandboxPermissionError(output)
-              ? "sandbox"
-              : null;
+        const cause = denialCause({
+          blockedWrite,
+          networkCause,
+          failed: (result as any).isError === true,
+          output,
+        });
         if (cause !== null) {
           // A `sandbox`-shaped denial that names a path is a profile gap, not a command
           // problem. Grant the path; only fall back to the command prompt when the output
