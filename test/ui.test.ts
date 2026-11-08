@@ -299,9 +299,9 @@ function capturePromptContext(): {
   };
 }
 
-test("permissionOptions preselects abort and Enter on a fresh prompt resolves abort", async () => {
+test("permissionOptions preselects allow-once and Enter on a fresh prompt grants once", async () => {
   const options = permissionOptions();
-  assert.equal(options[initialSelectedIndex(options)]?.action, "abort");
+  assert.equal(options[initialSelectedIndex(options)]?.action, "once");
   const { pi, ctx, component } = capturePromptContext();
   const result = showPermissionPrompt(
     pi,
@@ -313,7 +313,12 @@ test("permissionOptions preselects abort and Enter on a fresh prompt resolves ab
   );
   await Promise.resolve();
   component().handleInput("\r");
-  assert.deepEqual(await result, { action: "abort", value: "example.test" });
+  assert.deepEqual(await result, { action: "once", value: "example.test" });
+});
+
+test("a prompt without a one-shot grant still preselects abort", () => {
+  const options = permissionOptions({ once: false });
+  assert.equal(options[initialSelectedIndex(options)]?.action, "abort");
 });
 
 test("a confirming option needs a second Enter even when the shortcut is uppercase", async () => {
@@ -476,6 +481,45 @@ const specWithRule = (overrides: Partial<PermissionPromptSpec> = {}): Permission
   },
   note: "filesystem.write grants write only",
   ...overrides,
+});
+
+test("a profile-path rule shows the path it will add, and the input replaces it while editing", () => {
+  const rule = promptRuleFor(
+    { type: "profile-path", field: "filesystem.read", entry: "/home/user/.config" },
+    {
+      profilePath: "/home/user/.config/nono/profiles/pi.json",
+      configPath: "/home/user/.pi/agent/sandbox.json",
+      scope: "project",
+    },
+  );
+  assert.ok(rule);
+  const view = {
+    width: 90,
+    rows: 24,
+    theme,
+    selectedIndex: 2,
+    pendingAction: null,
+    editing: false,
+    error: null,
+    remainingSeconds: undefined,
+    options: baseOptions,
+  };
+  const collapsed = promptLines({ ...specWithRule(), rule }, view).join("\n");
+  // The static rule line, not the `writes to …` destination line.
+  assert.ok(collapsed.includes("│ /home/user/.config"));
+
+  const editingLines = promptLines(
+    { ...specWithRule(), rule },
+    {
+      ...view,
+      editing: true,
+      input: () => "/home/user/.config",
+    },
+  );
+  const ruleLines = editingLines.filter((line) => line.includes("filesystem.read += "));
+  // The editable input is the only occurrence; a static copy would duplicate it.
+  assert.equal(ruleLines.length, 1);
+  assert.ok(ruleLines[0]!.includes("/home/user/.config"));
 });
 
 const baseOptions = permissionOptions();

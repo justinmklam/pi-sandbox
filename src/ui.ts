@@ -172,10 +172,14 @@ export function permissionOptions({ once = true }: { once?: boolean } = {}): Pro
 }
 
 /**
- * The safe default: Abort is preselected so a stray Enter never grants access. Falls back to
- * the last option when a custom option set omits it.
+ * Preselect the one-shot grant when the prompt offers one, so Enter allows the operation
+ * once. Prompts with no one-shot grant (a session-only or command-only option set) keep
+ * Abort preselected: a stray Enter must never persist a rule or a session-wide allowance.
+ * Falls back to the last option when the set omits Abort too.
  */
 export function initialSelectedIndex(options: PromptOption[]): number {
+  const onceIndex = options.findIndex((option) => option.action === "once");
+  if (onceIndex !== -1) return onceIndex;
   const abortIndex = options.findIndex((option) => option.action === "abort");
   return abortIndex === -1 ? Math.max(0, options.length - 1) : abortIndex;
 }
@@ -230,7 +234,11 @@ export function promptLines(spec: PermissionPromptSpec, view: PromptLinesView): 
       out.push(`${gutter}${theme.fg("accent", prefix)}${view.input(inputWidth)}`);
     }
     if (!collapsed) {
-      for (const line of rule.lines) out.push(`${gutter}${line}`);
+      // An editable rule shows its value as the input while editing; the static lines
+      // would duplicate it, so they only render outside edit mode.
+      if (!(view.editing && rule.editable)) {
+        for (const line of rule.lines) out.push(`${gutter}${line}`);
+      }
       if (rule.destination) out.push(`${gutter}writes to ${rule.destination}`);
     }
     if (view.error) out.push(`${gutter}${theme.fg("error", `✗ ${view.error}`)}`);
@@ -323,7 +331,9 @@ export function promptRuleFor(
     case "profile-path":
       return {
         label: "rule to add",
-        lines: [],
+        // The entry is the path that will be written, so a non-editing prompt still
+        // shows what it is asking for (`prefix` alone names only the field).
+        lines: [fix.entry],
         prefix: `${fix.field} += `,
         destination: opts.profilePath,
         editable: true,
@@ -331,7 +341,7 @@ export function promptRuleFor(
     case "profile-domain":
       return {
         label: "rule to add",
-        lines: [],
+        lines: [fix.entry],
         prefix: "network.allow_domain += ",
         destination: opts.profilePath,
         editable: true,
