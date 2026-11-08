@@ -40,6 +40,18 @@ test("classifies a denied command domain from policy, not stderr", () => {
   });
 });
 
+test("an empty allowlist attributes no domain denial", () => {
+  const classified = classifyDenial({
+    tool: "bash",
+    command: "curl -sS https://api.rainviewer.com/public/weather-maps.json",
+    output: "curl: (6) Could not resolve host: api.rainviewer.com",
+    allowedDomains: [],
+  });
+  // Nothing in the profile rejects this host, so there is no fix to offer.
+  assert.equal(classified.kind, "unknown");
+  assert.equal(classified.fix, null);
+});
+
 test("classifies a bash write denial as filesystem.write, never filesystem.allow", () => {
   withTempDir((root) => {
     const target = join(root, "nested", "new", "file.txt");
@@ -156,6 +168,25 @@ test("classifies a child program's read denial as filesystem.read", () => {
       field: "filesystem.read",
       entry: canonicalizePath(join(root, "home")),
     });
+  });
+});
+
+test("a read denial on a home-directory path grants that path, not $HOME", () => {
+  const home = canonicalizePath(homedir());
+  const target = join(home, ".config");
+  const classified = classifyDenial({
+    tool: "bash",
+    command: "ls -la ~/.config",
+    // The exact shape a sandboxed `ls` prints; a directory grant for `$HOME` would be
+    // unbounded, so `containingDirectory` stops at the denied path itself.
+    output: `ls: cannot open directory '${target}': Permission denied`,
+    cwd: home,
+  });
+  assert.equal(classified.kind, "read");
+  assert.deepEqual(classified.fix, {
+    type: "profile-path",
+    field: "filesystem.read",
+    entry: target,
   });
 });
 

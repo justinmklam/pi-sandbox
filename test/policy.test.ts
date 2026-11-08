@@ -18,6 +18,7 @@ import {
   isDeniedPath,
   matchingDeny,
   matchesPattern,
+  networkPolicyDeclared,
   networkPromptDecision,
   resolveWritePermission,
   ruleBreadthError,
@@ -260,6 +261,35 @@ test("networkPromptDecision orders block, allowlist, then command shape", () => 
     networkPromptDecision(policy({ allowedDomains: ["x.dev"] }), "curl https://x.dev", "x.dev"),
     "allowed",
   );
-  assert.equal(networkPromptDecision(policy(), "curl https://x.dev", "x.dev"), "prompt");
+  assert.equal(
+    networkPromptDecision(policy({ allowedDomains: ["y.dev"] }), "curl https://x.dev", "x.dev"),
+    "prompt",
+  );
+  assert.equal(networkPromptDecision(policy(), "curl https://x.dev", "x.dev"), "allowed");
   assert.equal(networkPromptDecision(policy(), "echo https://x.dev", "x.dev"), "allowed");
+});
+
+test("a profile that declares no network policy is left entirely to nono", () => {
+  const policy = (overrides: Partial<ProfilePolicy> = {}): ProfilePolicy => ({
+    allowedDomains: [],
+    allowRead: [],
+    allowWrite: [],
+    deny: [],
+    blockNetwork: false,
+    ...overrides,
+  });
+
+  assert.equal(networkPolicyDeclared(policy()), false);
+  assert.equal(networkPolicyDeclared(policy({ allowedDomains: ["x.dev"] })), true);
+  assert.equal(networkPolicyDeclared(policy({ blockNetwork: true })), true);
+
+  // No allowlist means nono allows all egress: curl must not be prompted for at all.
+  assert.equal(
+    networkPromptDecision(
+      policy(),
+      "curl https://api.rainviewer.com/v2/radar",
+      "api.rainviewer.com",
+    ),
+    "allowed",
+  );
 });

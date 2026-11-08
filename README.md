@@ -331,7 +331,7 @@ affected sessions to apply grants or revocations consistently.
 
 | Rule | Behaviour |
 |------|-----------|
-| Domain not in `network.allow_domain` | Prompted (bash and `!cmd`) |
+| Domain outside a non-empty `network.allow_domain` | Prompted (bash and `!cmd`). A profile with neither `network.block` nor `allow_domain` is not policed by `pi-sandbox`: nono allows all egress, so no host is prompted for and no failure is attributed to a domain |
 | Path not allowed for reads | Prompted (`read`, `grep`, `find`, `ls`); granting adds to `filesystem.read` (read only) |
 | Path not allowed for writes | Prompted (`write`, `edit`, and bash write failures); granting adds to `filesystem.write` (write only, so a blocked `~/.ssh` write never widens reads) |
 | Bash command receives `Operation not permitted` or `Permission denied` | Prompted to run it outside the sandbox, or to save argv rules for matching commands |
@@ -346,7 +346,9 @@ legible even when the sandbox is disabled.
 
 `network.allow_domain` supports `*.example.com` wildcards. A profile that neither
 blocks the network nor names any `allow_domain` leaves all outbound domains
-allowed (nono's default). With `extends`, these can be set in a parent profile, so
+allowed (nono's default), and `pi-sandbox` adds no rule of its own: it prompts for
+a domain only when the profile declares an allowlist that omits that host. With
+`extends`, these can be set in a parent profile, so
 pi-sandbox does not warn about it. The working directory is granted with
 `--allow-cwd` at the level set by `workdir.access`; `filesystem.allow` adds other
 directories by prefix match. A permission prompt accepts a rule broader than the

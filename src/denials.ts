@@ -124,9 +124,12 @@ export function classifyDenial(input: {
   const cwd = input.cwd ?? process.cwd();
   const hasTarget = input.target !== undefined && input.target.length > 0;
 
-  // 1. The command's own hosts are the authoritative network-policy signal.
-  if (command.length > 0 && input.allowedDomains !== undefined) {
-    const host = deniedCommandDomain(command, input.allowedDomains);
+  // 1. The command's own hosts are the authoritative network-policy signal. An empty
+  // allowlist is not a rule: the profile leaves egress to nono's default, so no host can
+  // be outside it, and offering `/sandbox fix` would silently switch proxy filtering on.
+  const declaredDomains = input.allowedDomains?.length ? input.allowedDomains : undefined;
+  if (command.length > 0 && declaredDomains !== undefined) {
+    const host = deniedCommandDomain(command, declaredDomains);
     if (host !== null) {
       return { kind: "domain", target: host, fix: { type: "profile-domain", entry: host } };
     }

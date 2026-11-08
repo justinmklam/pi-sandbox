@@ -93,7 +93,7 @@ export function formatSandboxStatus(input: SandboxStatusInput): string {
     `Sandbox: ${stateWord}`,
     ...(input.state === "unavailable" && input.error ? [`  ${input.error}`] : []),
     `  Profile: ${input.profilePath}`,
-    `  Network: ${policy.blockNetwork ? "blocked by network.block: true" : `allow_domain ${summary(policy.allowedDomains)}`}`,
+    `  Network: ${policy.blockNetwork ? "blocked by network.block: true" : policy.allowedDomains.length === 0 ? "unrestricted (no network.allow_domain; nono allows all egress)" : `allow_domain ${summary(policy.allowedDomains)}`}`,
     `  Filesystem: read ${summary(policy.allowRead)}; write ${summary(policy.allowWrite)}`,
     `  Hard-denied: ${policy.deny.length} path(s) from filesystem.deny (no prompt)`,
     `  Session grants: domains ${summary(input.allowances.domains)}; read ${summary(input.allowances.readPaths)}; write ${summary(input.allowances.writePaths)}`,

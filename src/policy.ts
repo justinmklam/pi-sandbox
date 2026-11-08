@@ -95,6 +95,20 @@ export function domainIsAllowed(domain: string, allowedDomains: string[]): boole
 }
 
 /**
+ * True when the profile itself states a network rule pi-sandbox can enforce: either
+ * `network.block: true`, or a non-empty `network.allow_domain`, which is what makes nono
+ * route egress through its filtering proxy.
+ *
+ * A profile that says neither leaves outbound traffic on nono's default of allow-all. In
+ * that case the extension has no rule to apply, so it must not prompt for a host, and must
+ * not attribute a failure to a domain: doing either would be stricter than the profile the
+ * user wrote.
+ */
+export function networkPolicyDeclared(policy: ProfilePolicy): boolean {
+  return policy.blockNetwork || policy.allowedDomains.length > 0;
+}
+
+/**
  * The authoritative "this failure is a network-policy denial" signal: a host in
  * the command itself that the profile's `network.allow_domain` list rejects.
  * Stderr is only a fallback (`extractNetworkDenial`), because an unreachable
@@ -244,6 +258,9 @@ export function networkPromptDecision(
   domain: string,
 ): "allowed" | "prompt" | "blocked-by-profile" {
   if (policy.blockNetwork) return "blocked-by-profile";
+  // No declared allowlist means nono allows all egress, so there is nothing to prompt
+  // about. Prompting here would invent a policy the profile does not have.
+  if (!networkPolicyDeclared(policy)) return "allowed";
   if (domainIsAllowed(domain, policy.allowedDomains)) return "allowed";
   if (commandUsesNetwork(command)) return "prompt";
   return "allowed";

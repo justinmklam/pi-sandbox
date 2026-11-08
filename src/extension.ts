@@ -52,6 +52,7 @@ import {
   isDeniedPath,
   matchesPattern,
   matchingDeny,
+  networkPolicyDeclared,
   networkPromptDecision,
   resolveWritePermission,
   ruleBreadthError,
@@ -396,6 +397,86 @@ export default function (pi: ExtensionAPI) {
     }
     recordSandboxOverride("command", command, choice.action);
     return true;
+  }
+
+  type BashPathOutcome = { action: "retry" } | { action: "blocked"; denial: SandboxDenial } | null;
+
+  /**
+   * Turn a bash denial that names a path into the profile grant that fixes it.
+   *
+   * The command-allowlist prompt is the wrong instrument here: `ls` failing on
+   * `~/.config` is a read-policy gap, and approving `ls` only lets that one program run
+   * unsandboxed. `classifyDenial` already maps both stderr shapes
+   * (`ls: cannot open directory '…': Permission denied` and
+   * `mkdir: cannot create directory '…': Permission denied`) to
+   * `filesystem.read`/`filesystem.write`; this wires that classification into the bash
+   * recovery path, which previously only consulted it for the in-process tools.
+   *
+   * Returns `null` when no path is named (the caller keeps the command prompt), `retry`
+   * after a once/session/profile grant, and `blocked` when the path is hard-denied or
+   * the user refused.
+   */
+  async function fixBashPathDenial(
+    ctx: ExtensionContext,
+    command: string,
+    output: string,
+    toolCallId: string,
+  ): Promise<BashPathOutcome> {
+    const classified = classifyDenial({ tool: "bash", command, output, cwd: localCwd });
+    const fix = classified.fix;
+    if (fix === null || fix.type !== "profile-path") return null;
+
+    const kind = fix.field === "filesystem.write" ? "write" : "read";
+    const path = classified.target;
+    const deny = denyPaths();
+
+    if (isDeniedPath(path, deny)) {
+      return { action: "blocked", denial: hardDenyRecord(ctx, kind, path, "bash", command) };
+    }
+    if (isDeniedInSession(path, [...sessionDenials.paths])) {
+      const denial = classifyAndRecord(
+        ctx,
+        { tool: "bash", target: path, command, output },
+        "denied-session",
+      );
+      return { action: "blocked", denial };
+    }
+
+    const choice =
+      kind === "write"
+        ? await promptWriteBlock(
+            pi,
+            ctx,
+            writeSpec(path, fix),
+            originalRuleValue(fix, path),
+            deny,
+            promptTimeoutSeconds,
+          )
+        : await promptReadBlock(
+            pi,
+            ctx,
+            readSpec(path, fix),
+            originalRuleValue(fix, path),
+            deny,
+            promptTimeoutSeconds,
+          );
+
+    if (choice.action === "deny" || choice.action === "abort") {
+      if (choice.action === "deny") noteSessionDeny(kind, path);
+      const denial = classifyAndRecord(
+        ctx,
+        { tool: "bash", target: path, command, output },
+        choice.action === "deny"
+          ? "denied-session"
+          : choice.reason === "timeout"
+            ? "timeout"
+            : "aborted",
+      );
+      return { action: "blocked", denial };
+    }
+    const grant = asPersistedGrant(choice.action);
+    if (grant) await applyChoice(ctx, grant, kind, choice.value, toolCallId);
+    return { action: "retry" };
   }
 
   const sessionFor = (): SessionAllowances => allowances;
@@ -880,8 +961,14 @@ export default function (pi: ExtensionAPI) {
         const resolved = policyOrError();
         if ("policy" in resolved) {
           const policy = resolved.policy;
-          const policyHost = deniedCommandDomain(params.command, policy.allowedDomains);
-          const stderrSignal = policyHost === null ? extractNetworkDenial(output) : null;
+          // With no network rule in the profile, nono allows all egress: a failed command is
+          // not a domain denial, so there is no grant to offer and no fix to record.
+          const networkGoverned = networkPolicyDeclared(policy);
+          const policyHost = networkGoverned
+            ? deniedCommandDomain(params.command, policy.allowedDomains)
+            : null;
+          const stderrSignal =
+            networkGoverned && policyHost === null ? extractNetworkDenial(output) : null;
           networkCause = policyHost !== null || stderrSignal !== null;
           blockedWrite = extractBlockedWritePath(output) !== null;
           if (networkCause) {
@@ -969,6 +1056,14 @@ export default function (pi: ExtensionAPI) {
               ? "sandbox"
               : null;
         if (cause !== null) {
+          // A `sandbox`-shaped denial that names a path is a profile gap, not a command
+          // problem. Grant the path; only fall back to the command prompt when the output
+          // names no path (a bare `Operation not permitted`).
+          if (cause === "sandbox") {
+            const pathOutcome = await fixBashPathDenial(ctx, params.command, output, id);
+            if (pathOutcome?.action === "blocked") return withDenial(result, pathOutcome.denial);
+            if (pathOutcome?.action === "retry") return runBash();
+          }
           if (await allowCommandOutsideSandbox(params.command, ctx, cause)) {
             return localBash.execute(id, params, signal, onUpdate, ctx);
           }
