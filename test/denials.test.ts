@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -10,6 +10,7 @@ import {
   classifyDenial,
   headlessSuffix,
   type SandboxDenial,
+  ungrantedDeniedPath,
   upsertDenial,
 } from "../src/denials.ts";
 import { canonicalizePath } from "../src/policy.ts";
@@ -348,4 +349,185 @@ test("parseSandboxCommand defaults to status and accepts every subcommand", () =
   });
   assert.deepEqual(parseSandboxCommand("fix 12"), { sub: "fix", rest: ["12"] });
   assert.deepEqual(parseSandboxCommand("nonsense"), { sub: "help", rest: ["nonsense"] });
+});
+
+test("ungrantedDeniedPath names an existing path the profile does not grant", () => {
+  withTempDir((root) => {
+    const config = join(root, ".kube", "config");
+    mkdirSync(dirname(config), { recursive: true });
+    writeFileSync(config, "");
+    const output = `error: error loading config file "${config}": open ${config}: operation not permitted`;
+    const input = {
+      command: "kubectl config get-contexts 2>&1 | head -20",
+      output,
+      cwd: root,
+      allowRead: [],
+      allowWrite: [],
+      deny: [],
+      requireExisting: true,
+    };
+    assert.equal(ungrantedDeniedPath(input), canonicalizePath(config));
+    // Granted already, so whatever printed it was not the sandbox.
+    assert.equal(ungrantedDeniedPath({ ...input, allowRead: [dirname(config)] }), null);
+    // Hard-denied paths cannot be granted, so there is nothing to prompt for.
+    assert.equal(ungrantedDeniedPath({ ...input, deny: [dirname(config)] }), null);
+  });
+});
+
+test("ungrantedDeniedPath ignores quoted denials of paths that do not exist", () => {
+  withTempDir((root) => {
+    const missing = join(root, "p");
+    assert.equal(
+      ungrantedDeniedPath({
+        command: "git log -1 --format=%B",
+        output: `- Match (\`ls: cannot open directory '${missing}': Permission denied\`)`,
+        cwd: root,
+        allowRead: [],
+        allowWrite: [],
+        deny: [],
+        requireExisting: true,
+      }),
+      null,
+    );
+    // No path at all: a bare EPERM in printed text is never escalated on success.
+    assert.equal(
+      ungrantedDeniedPath({
+        command: "grep -r 'Operation not permitted' src",
+        output: "src/x.ts: return /Operation not permitted/.test(output);",
+        cwd: root,
+        allowRead: [],
+        allowWrite: [],
+        deny: [],
+        requireExisting: true,
+      }),
+      null,
+    );
+  });
+});
+
+test("ungrantedDeniedPath checks a write denial against the write grants", () => {
+  withTempDir((root) => {
+    const target = join(root, "new.txt");
+    const input = {
+      command: `touch ${target} | cat`,
+      output: `touch: ${target}: Operation not permitted`,
+      cwd: root,
+      allowRead: [root],
+      allowWrite: [],
+      deny: [],
+      requireExisting: true,
+    };
+    // The file does not exist yet, but its directory does.
+    assert.equal(ungrantedDeniedPath(input), canonicalizePath(target));
+    assert.equal(ungrantedDeniedPath({ ...input, allowWrite: [root] }), null);
+  });
+});
+
+test("ungrantedDeniedPath never offers a rule at / or above the home directory", () => {
+  // A doc comment quoting `ls: cannot open directory '/dev'` would otherwise offer `read: /`.
+  const base = {
+    cwd: process.cwd(),
+    allowRead: [],
+    allowWrite: [],
+    deny: [],
+    requireExisting: true,
+  };
+  assert.equal(
+    ungrantedDeniedPath({
+      ...base,
+      command: "grep -rn 'cannot open directory' src",
+      output: "src/x.ts:1: * `ls: cannot open directory '/dev': Permission denied`",
+    }),
+    null,
+  );
+  assert.equal(
+    ungrantedDeniedPath({
+      ...base,
+      command: "ls ~",
+      output: `ls: ${homedir()}: Operation not permitted`,
+    }),
+    null,
+  );
+});
+
+test("a writer elsewhere in the pipe does not make a read denial a write", () => {
+  withTempDir((root) => {
+    const config = join(root, ".kube", "config");
+    mkdirSync(dirname(config), { recursive: true });
+    writeFileSync(config, "");
+    const classified = classifyDenial({
+      tool: "bash",
+      command: "kubectl config get-contexts 2>&1 | tee ctx.txt",
+      output: `open ${config}: operation not permitted`,
+      cwd: root,
+    });
+    assert.equal(classified.kind, "read");
+    assert.deepEqual(classified.fix, {
+      type: "profile-path",
+      field: "filesystem.read",
+      entry: canonicalizePath(dirname(config)),
+    });
+    // A writer handed the denied path is still a write, even when it did not print the line.
+    const target = join(root, "out.txt");
+    assert.equal(
+      classifyDenial({
+        tool: "bash",
+        command: `touch ${target}`,
+        output: `${target}: Permission denied`,
+        cwd: root,
+      }).kind,
+      "write",
+    );
+  });
+});
+
+test("a Node denial is a write only for a mutating syscall", () => {
+  withTempDir((root) => {
+    const target = join(root, "cache");
+    const classify = (syscall: string) =>
+      classifyDenial({
+        tool: "bash",
+        command: "node build.js",
+        output: `Error: EPERM: operation not permitted, ${syscall} '${target}'`,
+        cwd: root,
+      }).kind;
+    assert.equal(classify("mkdir"), "write");
+    assert.equal(classify("open"), "read");
+  });
+});
+
+test("a relative denied path resolves in the directory a leading cd selects", () => {
+  withTempDir((root) => {
+    mkdirSync(join(root, "sub"));
+    const classified = classifyDenial({
+      tool: "bash",
+      command: "cd sub && cat ./x | head",
+      output: "cat: ./x: Permission denied",
+      cwd: root,
+    });
+    assert.equal(classified.target, canonicalizePath(join(root, "sub", "x")));
+  });
+});
+
+test("a failed command's denial need not exist but must still be ungranted", () => {
+  withTempDir((root) => {
+    const target = join(root, "missing", "file");
+    const input = {
+      command: `cat ${target}`,
+      output: `cat: ${target}: Operation not permitted`,
+      cwd: root,
+      allowRead: [],
+      allowWrite: [],
+      deny: [],
+      requireExisting: false,
+    };
+    assert.equal(ungrantedDeniedPath(input), canonicalizePath(target));
+    // Already granted: an ordinary Unix permission error, not the sandbox.
+    assert.equal(ungrantedDeniedPath({ ...input, allowRead: [root] }), null);
+    // A hard deny inside a granted directory is still the sandbox, so it gets recorded.
+    assert.equal(
+      ungrantedDeniedPath({ ...input, allowRead: [root], deny: [target] }),
+      canonicalizePath(target),
+    );
+  });
 });

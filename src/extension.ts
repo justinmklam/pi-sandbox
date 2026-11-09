@@ -27,6 +27,7 @@ import {
 import {
   appendHeadlessSuffix,
   classifyDenial,
+  ungrantedDeniedPath,
   upsertDenial,
   type SandboxDenial,
   type SandboxFix,
@@ -812,19 +813,20 @@ export default function (pi: ExtensionAPI) {
         }).execute(id, params, signal, onUpdate, ctx);
       };
 
+      // The bash tool throws on a non-zero exit rather than setting `isError`, so the catch
+      // below is the only place a failure is visible; a rerun that returns succeeded.
       let result: AgentToolResult<any>;
+      let failed = false;
       try {
         result = await runBash();
       } catch (error) {
         if (
           !(error instanceof Error) ||
-          !(
-            error.message.includes("Operation not permitted") ||
-            error.message.includes("Permission denied")
-          )
+          !/operation not permitted|permission denied/i.test(error.message)
         ) {
           throw error;
         }
+        failed = true;
         result = {
           content: [
             {
@@ -923,6 +925,7 @@ export default function (pi: ExtensionAPI) {
           }
           if (writePermission.action === "allow") {
             result = await runBash();
+            failed = false;
           }
           if (writePermission.action === "granted") {
             onUpdate?.({
@@ -935,6 +938,7 @@ export default function (pi: ExtensionAPI) {
               details: {},
             });
             result = await runBash();
+            failed = false;
           }
         }
       }
@@ -1045,15 +1049,33 @@ export default function (pi: ExtensionAPI) {
         }
       }
 
-      // Only a failed command can have been denied. Scanning a successful command's output
-      // too made every command that prints a denial shape — `git log` of a commit that
-      // documents one, a README table, a grep for `Operation not permitted` — offer an
-      // escalation for a block that never happened.
+      // A denial counts when its output names a path the profile does not grant, whatever the
+      // exit status: `kubectl ... | head` exits 0 after a real denial. A successful command's
+      // path must also exist, so text that merely quotes a denial — `git log` of a commit that
+      // documents one, a README table — does not offer an escalation. A failure naming a path
+      // the profile already grants is ordinary Unix permissions, not the sandbox.
       if (sandboxEnabled && !sandboxError && ctx?.hasUI) {
+        let ungrantedPath = false;
+        const resolved = policyOrError();
+        if ("policy" in resolved) {
+          const { allowRead, allowWrite, deny } = resolved.policy;
+          ungrantedPath =
+            ungrantedDeniedPath({
+              command: params.command,
+              output,
+              cwd: localCwd,
+              allowRead,
+              allowWrite,
+              deny,
+              // A failed command may have been denied creating the path.
+              requireExisting: !failed,
+            }) !== null;
+        }
         const cause = denialCause({
           blockedWrite,
           networkCause,
-          failed: (result as any).isError === true,
+          failed,
+          ungrantedPath,
           output,
         });
         if (cause !== null) {

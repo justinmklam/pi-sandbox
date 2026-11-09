@@ -1,14 +1,22 @@
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
 
 import {
+  argvSegments,
   deriveCommandArgv,
   extractPermissionDeniedPath,
   isSandboxPermissionError,
   sandboxConfigPath,
 } from "./command-policy.ts";
 import { extractBlockedWritePath } from "./nono.ts";
-import { canonicalizePath, deniedCommandDomain, extractNetworkDenial } from "./policy.ts";
+import {
+  canonicalizePath,
+  deniedCommandDomain,
+  extractNetworkDenial,
+  isDeniedPath,
+  matchesPattern,
+} from "./policy.ts";
 
 export type SandboxDenialKind = "read" | "write" | "domain" | "port" | "command" | "unknown";
 
@@ -79,11 +87,58 @@ const WRITE_PROGRAMS = new Set([
   "zip",
 ]);
 
-/** Whether any shell segment in the command is a program that writes files. */
-function commandWritesFiles(command: string, cwd: string): boolean {
+/** Node syscalls that modify the filesystem, named in `EPERM: ..., mkdir '/p'`. */
+const NODE_WRITE_SYSCALLS = new Set([
+  "chmod",
+  "chown",
+  "copyfile",
+  "lchown",
+  "link",
+  "mkdir",
+  "mkdtemp",
+  "rename",
+  "rmdir",
+  "symlink",
+  "truncate",
+  "unlink",
+  "utime",
+]);
+
+/** The directory a leading `cd` moves the command to, so relative paths resolve there. */
+function commandDirectory(command: string, cwd: string): string {
+  const { segments } = argvSegments(command, cwd);
+  return segments.findLast((segment) => segment.dir !== null)?.dir ?? cwd;
+}
+
+/**
+ * Whether a denial of `path` came from a write. A pipeline such as `kubectl ... | tee out.txt`
+ * contains a writing program without that program being the one denied, so a writer only
+ * counts when it printed the denial line (`touch: /p: Operation not permitted`), Node named a
+ * mutating syscall, or a writing segment was handed the denied path as an argument.
+ */
+function denialIsWrite(
+  command: string,
+  cwd: string,
+  output: string,
+  printed: string,
+  path: string,
+): boolean {
   if (command.length === 0) return false;
-  const { argv } = deriveCommandArgv(command, cwd);
-  return argv.some((segment) => WRITE_PROGRAMS.has(basename(segment[0] ?? "")));
+  const line = output
+    .split("\n")
+    .find(
+      (candidate) =>
+        candidate.includes(printed) && /operation not permitted|permission denied/i.test(candidate),
+    );
+  const printer = line?.match(/^([^\s:]+):/)?.[1];
+  if (printer !== undefined && WRITE_PROGRAMS.has(basename(printer))) return true;
+  const syscall = line?.match(/\bE(?:PERM|ACCES): [^,]+, (\w+) '/)?.[1];
+  if (syscall !== undefined) return NODE_WRITE_SYSCALLS.has(syscall);
+  return argvSegments(command, cwd).segments.some(
+    ({ argv, dir }) =>
+      WRITE_PROGRAMS.has(basename(argv[0] ?? "")) &&
+      argv.slice(1).some((arg) => canonicalizePath(resolve(dir ?? cwd, arg)) === path),
+  );
 }
 
 /**
@@ -146,9 +201,11 @@ export function classifyDenial(input: {
   // half of the policy is missing; the command decides.
   const deniedPath = extractPermissionDeniedPath(output);
   if (deniedPath !== null) {
-    const resolved = isAbsolute(deniedPath) ? deniedPath : resolve(cwd, deniedPath);
+    const resolved = isAbsolute(deniedPath)
+      ? deniedPath
+      : resolve(commandDirectory(command, cwd), deniedPath);
     const path = canonicalizePath(resolved);
-    const writes = commandWritesFiles(command, cwd);
+    const writes = denialIsWrite(command, cwd, output, deniedPath, path);
     return {
       kind: writes ? "write" : "read",
       target: path,
@@ -202,6 +259,45 @@ export function classifyDenial(input: {
     target: input.target ?? (command.length > 0 ? command : input.tool),
     fix: null,
   };
+}
+
+/**
+ * The path a command's output reports as denied, when that report is credible enough to
+ * prompt for: the profile grants the path nothing and the rule a prompt would offer stays
+ * narrower than the home directory. A hard-denied path counts only for a failed command. With `requireExisting` (a
+ * command that exited 0) the path must also exist, or for a write its directory: a pipe such
+ * as `kubectl ... | head` exits 0 because `head` does, so exit status alone hides the denial,
+ * while text that merely quotes one (a commit message naming `/p`, a README table) names a
+ * path that is missing or already granted, and a bare `Operation not permitted` names none.
+ */
+export function ungrantedDeniedPath(input: {
+  command: string;
+  output: string;
+  cwd: string;
+  allowRead: string[];
+  allowWrite: string[];
+  deny: string[];
+  requireExisting: boolean;
+}): string | null {
+  const { target, fix } = classifyDenial({
+    tool: "bash",
+    command: input.command,
+    output: input.output,
+    cwd: input.cwd,
+  });
+  if (fix === null || fix.type !== "profile-path") return null;
+  // A hard deny overrides every grant, so a failure on one is the sandbox even inside a granted
+  // directory (the caller records it without prompting); success makes it quoted text.
+  if (isDeniedPath(target, input.deny)) return input.requireExisting ? null : target;
+  // The rule a prompt would offer must stay narrow: quoted text naming `/dev` would
+  // otherwise offer `filesystem.read: /`.
+  const home = canonicalizePath(homedir());
+  if (fix.entry === "/" || home === fix.entry || home.startsWith(`${fix.entry}/`)) return null;
+  const write = fix.field === "filesystem.write";
+  if (input.requireExisting && !existsSync(target) && !(write && existsSync(dirname(target)))) {
+    return null;
+  }
+  return matchesPattern(target, write ? input.allowWrite : input.allowRead) ? null : target;
 }
 
 /**

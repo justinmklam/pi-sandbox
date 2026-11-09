@@ -519,10 +519,11 @@ export function hasUnsandboxedCommand(
 
 /**
  * Bash reports the paths it opens itself (`bash: line 1: /p: Permission denied`) together
- * with the EPERM shape the seatbelt backend uses.
+ * with the EPERM shape the seatbelt backend uses. Go programs (`kubectl`, `gh`, `terraform`)
+ * print the same errors in lowercase (`open /p: operation not permitted`).
  */
 const BASH_DENIED_PATH =
-  /(?:\/bin\/bash|\/bin\/sh|bash|sh|zsh): (?:line \d+: )?(\/[^\s:]+): (?:Operation not permitted|Permission denied)/;
+  /(?:\/bin\/bash|\/bin\/sh|bash|sh|zsh): (?:line \d+: )?(\/[^\s:]+): (?:[Oo]peration not permitted|[Pp]ermission denied)/;
 
 /**
  * A child program that opens the path itself prints its own name instead of bash's, and
@@ -531,7 +532,13 @@ const BASH_DENIED_PATH =
  * explicit-relative, so prose that merely contains "permission denied" stays unmatched.
  */
 const CHILD_DENIED_PATH =
-  /(?:^|\s)(?:'([^'\n]+)'|"([^"\n]+)"|((?:~|\/|\.{1,2}\/)[^\s:'"]*)):\s*(?:Operation not permitted|Permission denied)\b/m;
+  /(?:^|\s)(?:'([^'\n]+)'|"([^"\n]+)"|((?:~|\/|\.{1,2}\/)[^\s:'"]*)):\s*(?:[Oo]peration not permitted|[Pp]ermission denied)\b/m;
+
+/**
+ * Node names the path after the reason: `EPERM: operation not permitted, open '/p'`.
+ */
+const NODE_DENIED_PATH =
+  /\bE(?:PERM|ACCES): (?:operation not permitted|permission denied), \w+ '([^'\n]+)'/;
 
 /** The path a permission denial names, whoever printed it. */
 export function extractPermissionDeniedPath(output: string): string | null {
@@ -539,6 +546,8 @@ export function extractPermissionDeniedPath(output: string): string | null {
   if (bash) return bash[1]!;
   const child = CHILD_DENIED_PATH.exec(output);
   if (child) return child[1] ?? child[2] ?? child[3] ?? null;
+  const node = NODE_DENIED_PATH.exec(output);
+  if (node) return node[1]!;
   return null;
 }
 
@@ -550,23 +559,33 @@ export function extractPermissionDeniedPath(output: string): string | null {
  */
 export function isSandboxPermissionError(output: string): boolean {
   if (extractPermissionDeniedPath(output) !== null) return true;
-  return /Operation not permitted/.test(output);
+  return /[Oo]peration not permitted/.test(output);
 }
 
 /**
- * Which recovery a finished bash call deserves. The output scan counts only when the command
- * failed: a successful command cannot have been denied, and text it merely printed (a commit
- * message quoting `ls: cannot open directory '/p': Permission denied`, a README table, a grep
- * for `Operation not permitted`) is not evidence of a sandbox block.
+ * Which recovery a finished bash call deserves. A denial that names a path counts only when
+ * `ungrantedPath` holds (the caller checked it against the profile), whatever the exit status:
+ * text a successful command merely printed (a commit message quoting
+ * `ls: cannot open directory '/p': Permission denied`, a README table) names a missing or
+ * granted path, while a pipe such as `kubectl ... | head` exits 0 after a real denial. A bare
+ * `Operation not permitted` names nothing to check, so it counts only when the command failed.
  */
 export function denialCause(input: {
   blockedWrite: boolean;
   networkCause: boolean;
   failed: boolean;
+  ungrantedPath: boolean;
   output: string;
 }): "filesystem" | "network" | "sandbox" | null {
   if (input.blockedWrite) return "filesystem";
   if (input.networkCause) return "network";
-  if (input.failed && isSandboxPermissionError(input.output)) return "sandbox";
+  if (input.ungrantedPath) return "sandbox";
+  if (
+    input.failed &&
+    extractPermissionDeniedPath(input.output) === null &&
+    isSandboxPermissionError(input.output)
+  ) {
+    return "sandbox";
+  }
   return null;
 }

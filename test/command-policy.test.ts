@@ -568,26 +568,73 @@ test("a denial shape in a successful command's output is not a denial", () => {
     "- Match the denial shapes a child program prints itself (`ls: cannot open directory '/p': Permission denied`)";
   assert.equal(isSandboxPermissionError(printed), true);
   assert.equal(
-    denialCause({ blockedWrite: false, networkCause: false, failed: false, output: printed }),
+    denialCause({
+      blockedWrite: false,
+      networkCause: false,
+      failed: false,
+      ungrantedPath: false,
+      output: printed,
+    }),
     null,
   );
   assert.equal(
-    denialCause({ blockedWrite: false, networkCause: false, failed: true, output: printed }),
+    denialCause({
+      blockedWrite: false,
+      networkCause: false,
+      failed: true,
+      ungrantedPath: false,
+      output: printed,
+    }),
+    null,
+  );
+  // Only a bare EPERM, which names nothing to check against the profile, needs the failure.
+  const bare = { blockedWrite: false, networkCause: false, ungrantedPath: false };
+  assert.equal(
+    denialCause({ ...bare, failed: true, output: "unshare: Operation not permitted" }),
+    "sandbox",
+  );
+  assert.equal(
+    denialCause({ ...bare, failed: false, output: "unshare: Operation not permitted" }),
+    null,
+  );
+});
+
+test("a successful command that names an ungranted path is a denial", () => {
+  // `kubectl ... | head` exits 0 because `head` does; the pipe hides the denial's status.
+  assert.equal(
+    denialCause({
+      blockedWrite: false,
+      networkCause: false,
+      failed: false,
+      ungrantedPath: true,
+      output: "open /home/u/.kube/config: operation not permitted",
+    }),
     "sandbox",
   );
 });
 
+test("extracts the lowercase denial Go programs print", () => {
+  const kubectl =
+    'error: error loading config file "/home/u/.kube/config": open /home/u/.kube/config: operation not permitted';
+  assert.equal(extractPermissionDeniedPath(kubectl), "/home/u/.kube/config");
+  assert.equal(extractPermissionDeniedPath("open /etc/x: permission denied"), "/etc/x");
+  assert.equal(isSandboxPermissionError("operation not permitted"), true);
+});
+
+test("extracts the path Node prints after the reason", () => {
+  assert.equal(
+    extractPermissionDeniedPath("Error: EPERM: operation not permitted, open '/home/u/.npmrc'"),
+    "/home/u/.npmrc",
+  );
+  assert.equal(extractPermissionDeniedPath("EACCES: permission denied, mkdir '/opt/x'"), "/opt/x");
+});
+
 test("denialCause keeps write and network causes ahead of the output scan", () => {
+  const base = { failed: true, ungrantedPath: false, output: "" };
+  assert.equal(denialCause({ ...base, blockedWrite: true, networkCause: false }), "filesystem");
+  assert.equal(denialCause({ ...base, blockedWrite: false, networkCause: true }), "network");
   assert.equal(
-    denialCause({ blockedWrite: true, networkCause: false, failed: true, output: "" }),
-    "filesystem",
-  );
-  assert.equal(
-    denialCause({ blockedWrite: false, networkCause: true, failed: true, output: "" }),
-    "network",
-  );
-  assert.equal(
-    denialCause({ blockedWrite: false, networkCause: false, failed: true, output: "ok" }),
+    denialCause({ ...base, blockedWrite: false, networkCause: false, output: "ok" }),
     null,
   );
 });
