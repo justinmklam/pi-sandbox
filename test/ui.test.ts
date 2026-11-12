@@ -14,6 +14,7 @@ import {
   promptRuleFor,
   permissionPromptRemainingSeconds,
   permissionPromptTimeoutMs,
+  promptReadBlock,
   resolvePromptTimeoutSeconds,
   unsandboxedCommandOptions,
   showPermissionPrompt,
@@ -83,6 +84,29 @@ test("permissionOptions defaults to the XDG profile path", () => {
     if (originalXdg === undefined) delete process.env.XDG_CONFIG_HOME;
     else process.env.XDG_CONFIG_HOME = originalXdg;
   }
+});
+
+test("permissionOptions adds a custom session-path editor only when requested", () => {
+  assert.deepEqual(
+    permissionOptions({ customPath: true }).map((option) => [
+      option.label,
+      option.key,
+      option.action,
+      option.edit,
+    ]),
+    [
+      ["Allow once", "o", "once", undefined],
+      ["Allow for this session", "s", "session", undefined],
+      ["Allow a custom path this session", "m", "session", true],
+      ["Save this rule to the profile", "p", "project", undefined],
+      ["Deny for this session", "d", "deny", undefined],
+      ["Abort (keep blocked)", "esc", "abort", undefined],
+    ],
+  );
+  assert.equal(
+    permissionOptions().some((option) => option.key === "m"),
+    false,
+  );
 });
 
 test("permissionPromptRemainingSeconds rounds up and stops at zero", () => {
@@ -414,6 +438,78 @@ test(
     assert.deepEqual(await result, { action: "abort", value: "example.test", reason: "timeout" });
   },
 );
+
+test("a read denial custom-path choice edits a blank value and grants that path for the session", async () => {
+  const { pi, ctx, component } = capturePromptContext();
+  const result = promptReadBlock(
+    pi,
+    ctx,
+    {
+      severity: "warn",
+      title: "Read blocked",
+      subjectLabel: "path",
+      subject: "/home/user/project/notes.txt",
+      rule: {
+        label: "rule to add",
+        lines: ["/home/user/project"],
+        prefix: "filesystem.read += ",
+        editable: true,
+      },
+    },
+    "/home/user/project",
+    [],
+    0,
+  );
+  await Promise.resolve();
+
+  component().handleInput("m");
+  assert.ok(
+    component()
+      .render(120)
+      .some((line) => line.includes("filesystem.read += ")),
+  );
+  component().handleInput("/home/user");
+  component().handleInput("\r");
+
+  assert.deepEqual(await result, { action: "session", value: "/home/user" });
+});
+
+test("a custom session path that does not cover the denial stays in edit mode", async () => {
+  const { pi, ctx, component } = capturePromptContext();
+  const result = promptReadBlock(
+    pi,
+    ctx,
+    {
+      severity: "warn",
+      title: "Read blocked",
+      subjectLabel: "path",
+      subject: "/home/user/project/notes.txt",
+      rule: {
+        label: "rule to add",
+        lines: ["/home/user/project"],
+        prefix: "filesystem.read += ",
+        editable: true,
+      },
+    },
+    "/home/user/project",
+    [],
+    0,
+  );
+  await Promise.resolve();
+
+  component().handleInput("m");
+  component().handleInput("/tmp/unrelated");
+  component().handleInput("\r");
+
+  assert.ok(
+    component()
+      .render(120)
+      .some((line) => line.includes("Rule must match the blocked path")),
+  );
+  component().handleInput("\u001b");
+  component().handleInput("\u001b");
+  assert.deepEqual(await result, { action: "abort", value: "/home/user/project" });
+});
 
 test("permissionOptions offers once, session, profile save, session deny, and abort in order", () => {
   assert.deepEqual(

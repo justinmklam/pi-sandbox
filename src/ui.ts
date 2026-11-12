@@ -45,6 +45,9 @@ export interface PromptOption {
   action: PermissionChoice;
   confirm?: boolean;
   hint?: string;
+  /** Start the rule editor with `editInitialValue` when this shortcut is pressed. */
+  edit?: boolean;
+  editInitialValue?: string;
 }
 
 export type PromptRule = {
@@ -154,11 +157,25 @@ export function unsandboxedCommandOptions({
   ];
 }
 
-export function permissionOptions({ once = true }: { once?: boolean } = {}): PromptOption[] {
+export function permissionOptions({
+  once = true,
+  customPath = false,
+}: { once?: boolean; customPath?: boolean } = {}): PromptOption[] {
   const profilePath = resolveProfilePath();
   return [
     ...(once ? [{ label: "Allow once", key: "o", action: "once" as const }] : []),
     { label: "Allow for this session", key: "s", action: "session" },
+    ...(customPath
+      ? [
+          {
+            label: "Allow a custom path this session",
+            key: "m",
+            action: "session" as const,
+            edit: true,
+            editInitialValue: "",
+          },
+        ]
+      : []),
     {
       label: "Save this rule to the profile",
       key: "p",
@@ -424,8 +441,8 @@ async function showPermissionPromptUnlocked(
     const updateFocus = (): void => {
       input.focused = componentFocused && editing;
     };
-    const beginEditing = (): void => {
-      input.setValue(originalValue);
+    const beginEditing = (initialValue = originalValue): void => {
+      input.setValue(initialValue);
       input.handleInput("\x05");
       editing = true;
       error = null;
@@ -532,13 +549,20 @@ async function showPermissionPromptUnlocked(
         }
         if (matchesKey(data, Key.tab) && isGrantAction(selectedOption().action)) {
           markInteracted();
-          beginEditing();
+          const option = selectedOption();
+          beginEditing(option.edit ? (option.editInitialValue ?? originalValue) : originalValue);
           tui.requestRender();
           return;
         }
         if (matchesKey(data, Key.enter)) {
           markInteracted();
-          resolve(pendingAction ?? selectedOption().action);
+          const option = selectedOption();
+          if (option.edit) {
+            beginEditing(option.editInitialValue ?? originalValue);
+            tui.requestRender();
+            return;
+          }
+          resolve(pendingAction ?? option.action);
           return;
         }
         if (matchesKey(data, Key.up) || matchesKey(data, Key.down)) {
@@ -554,6 +578,12 @@ async function showPermissionPromptUnlocked(
         );
         if (!option) return;
         markInteracted();
+        if (option.edit) {
+          selectedIndex = options.indexOf(option);
+          beginEditing(option.editInitialValue ?? originalValue);
+          tui.requestRender();
+          return;
+        }
         if (option.confirm) {
           pendingAction = option.action;
           selectedIndex = options.indexOf(option);
@@ -644,6 +674,7 @@ export function promptReadBlock(
     (value) =>
       validRule(value, matchesPattern(spec.subject, [value]), `path "${spec.subject}"`, deny),
     timeoutSeconds,
+    permissionOptions({ customPath: true }),
   );
 }
 
@@ -663,5 +694,6 @@ export function promptWriteBlock(
     (value) =>
       validRule(value, matchesPattern(spec.subject, [value]), `path "${spec.subject}"`, deny),
     timeoutSeconds,
+    permissionOptions({ customPath: true }),
   );
 }
